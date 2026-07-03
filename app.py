@@ -1,10 +1,16 @@
 from __future__ import annotations
+import base64
 import importlib.util
 from pathlib import Path
 from typing import Any
+import logging
 import streamlit as st
 from PIL import Image
 import io
+
+APP_NAME = "Comfort Group Portal"
+APP_SHORT_NAME = "Comfort Portal"
+APP_THEME_COLOR = "#2563eb"
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
@@ -31,16 +37,19 @@ except Exception:
 try:
     # Convert image to PNG bytes for predictable Streamlit behavior
     _logo_icon = None
+    _logo_data_uri = None
     try:
         if _logo_img is not None:
             buf = io.BytesIO()
             _logo_img.save(buf, format="PNG")
             buf.seek(0)
             _logo_icon = buf.getvalue()
+            _logo_data_uri = f"data:image/png;base64,{base64.b64encode(_logo_icon).decode('ascii')}"
     except Exception:
         _logo_icon = None
+        _logo_data_uri = None
 
-    st.set_page_config(page_title="Comfort Group Portal", page_icon=_logo_icon or "📘", layout="wide")
+    st.set_page_config(page_title=APP_NAME, page_icon=_logo_icon or "📘", layout="wide")
     st.markdown(
         """
         <style>
@@ -53,6 +62,19 @@ try:
         """,
         unsafe_allow_html=True,
     )
+
+    if _logo_data_uri is not None:
+        st.markdown(
+            f"""
+            <link rel="apple-touch-icon" sizes="180x180" href="{_logo_data_uri}">
+            <meta name="apple-mobile-web-app-title" content="{APP_NAME}">
+            <meta name="application-name" content="{APP_NAME}">
+            <meta name="theme-color" content="{APP_THEME_COLOR}">
+            <meta name="msapplication-TileColor" content="{APP_THEME_COLOR}">
+            <link rel="icon" type="image/png" sizes="32x32" href="{_logo_data_uri}">
+            """,
+            unsafe_allow_html=True,
+        )
 except Exception:
     # If Streamlit has already been configured elsewhere, ignore to avoid crash.
     pass
@@ -312,4 +334,26 @@ def main() -> None:
             selected_page.run()
 
 if __name__ == "__main__":
-    main()
+    logging.basicConfig(
+        level=logging.ERROR,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    try:
+        main()
+    except Exception:
+        logging.error("Unexpected application error:", exc_info=True)
+        st.markdown(
+            """
+            <div style="max-width: 840px; margin: 28px auto; padding: 24px; border-radius: 22px; background: linear-gradient(135deg, #eef2ff 0%, #dbeafe 100%); border: 1px solid #bfdbfe; box-shadow: 0 18px 45px rgba(30, 64, 175, 0.08);">
+                <h2 style="margin: 0 0 12px; color: #1e3a8a; font-size: 1.55rem; font-weight: 700;">Connection delay detected</h2>
+                <p style="margin: 0 0 14px; color: #475569; font-size: 1rem; line-height: 1.7;">
+                    We’re experiencing a temporary network or database delay. The portal is pausing while we reconnect gracefully.
+                </p>
+                <p style="margin: 0; color: #0f172a; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.01em;">
+                    Please wait a moment and then refresh if the issue persists.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.stop()
