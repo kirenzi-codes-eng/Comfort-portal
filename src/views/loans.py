@@ -1,3 +1,4 @@
+import time
 import streamlit as st
 from datetime import datetime, date
 from typing import Optional, Tuple
@@ -5,6 +6,7 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from src.database.connection import execute_query
+from src.utils.membership import normalize_membership_status
 from src.views.home import get_financial_metrics, calculate_member_status
 
 LEADERSHIP_ROLES = ("Treasurer", "Secretary", "Chairperson")
@@ -12,6 +14,38 @@ LEADERSHIP_ROLES = ("Treasurer", "Secretary", "Chairperson")
 
 def months_between(start_date: datetime, end_date: datetime) -> int:
     return max(0, (end_date.year - start_date.year) * 12 + end_date.month - start_date.month)
+
+
+def normalize_loan_status(status: Optional[str]) -> str:
+    if status is None:
+        return "Pending"
+    normalized = str(status).strip()
+    if not normalized:
+        return "Pending"
+    return normalized
+
+
+def render_loan_status_badge(status: Optional[str]) -> str:
+    normalized = normalize_loan_status(status)
+    if normalized == "Approved":
+        return "<span class='loan-badge loan-badge-approved'>Approved</span>"
+    if normalized == "Rejected":
+        return "<span class='loan-badge loan-badge-rejected'>Rejected</span>"
+    if normalized in {"Submitted", "Pending"}:
+        return "<span class='loan-badge loan-badge-pending'>Pending</span>"
+    return f"<span class='loan-badge loan-badge-default'>{normalized}</span>"
+
+
+def fetch_latest_member_loan(member_id: Optional[str]) -> Optional[dict]:
+    if not member_id:
+        return None
+    rows = execute_query(
+        "SELECT loan_id, amount_requested, status, approved_by, approved_date, applied_date "
+        "FROM loans WHERE member_id = %s ORDER BY applied_date DESC, loan_id DESC LIMIT 1;",
+        params=(member_id,),
+        fetch=True,
+    )
+    return rows[0] if rows else None
 
 
 def parse_join_date(join_date) -> Optional[datetime]:
@@ -105,78 +139,108 @@ def inject_loans_theme() -> None:
         """
         <style>
         .stApp {
-            background: linear-gradient(135deg, #f8fbff 0%, #eef7f5 100%);
+            background: #f8f9fa;
         }
         .form-card {
-            background: linear-gradient(135deg, #f8fbff 0%, #eef7ff 100%);
-            border: 1px solid rgba(15, 118, 110, 0.16);
-            border-radius: 22px;
-            padding: 22px;
-            box-shadow: 0 18px 38px rgba(15, 23, 42, 0.08);
-            margin-bottom: 18px;
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+            margin-bottom: 10px;
         }
         .audit-terminal {
-            background: linear-gradient(135deg, #04131f 0%, #0f172a 100%);
-            border: 1px solid rgba(45, 212, 191, 0.24);
-            border-radius: 18px;
-            padding: 16px 18px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 10px 12px;
             color: #d1fae5;
             font-family: 'Courier New', Courier, monospace;
-            font-size: 0.92rem;
-            line-height: 1.7;
+            font-size: 0.8rem;
+            line-height: 1.5;
             white-space: pre-wrap;
-            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
         }
         .lock-container {
-            background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
-            border: 1px solid rgba(217, 119, 6, 0.24);
-            border-radius: 20px;
-            padding: 18px 20px;
-            box-shadow: 0 14px 28px rgba(217, 119, 6, 0.12);
-            margin-bottom: 16px;
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+            margin-bottom: 10px;
         }
         .vitals-panel {
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 22px;
-            padding: 20px;
-            box-shadow: 0 16px 30px rgba(15, 23, 42, 0.06);
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
         }
         .status-choice {
             display: inline-block;
-            padding: 7px 10px;
+            padding: 0.2rem 0.55rem;
             border-radius: 999px;
-            background: #e2e8f0;
+            background: #f8f9fa;
             color: #334155;
-            font-size: 0.8rem;
+            font-size: 0.72rem;
             font-weight: 700;
             letter-spacing: 0.04em;
             text-transform: uppercase;
-            margin-right: 8px;
-            margin-bottom: 8px;
+            margin-right: 6px;
+            margin-bottom: 6px;
         }
         .status-choice.active {
-            background: linear-gradient(135deg, #0f766e 0%, #0f172a 100%);
-            color: #f8fafc;
+            background: #2563eb;
+            color: #ffffff;
         }
         .pathway-cards {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 16px;
+            gap: 10px;
             align-items: stretch;
             margin-top: 6px;
-            margin-bottom: 14px;
+            margin-bottom: 10px;
         }
         .pathway-card {
-            border-radius: 24px;
-            padding: 28px 30px;
-            box-shadow: 0 16px 34px rgba(15, 23, 42, 0.08);
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
         }
         .pathway-card-accent {
-            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 45%, #fb923c 100%);
+            background: #fff8e1;
         }
         .pathway-card-light {
             background: #ffffff;
+        }
+        .loan-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            font-weight: 700;
+            font-size: 0.72rem;
+            letter-spacing: 0.03em;
+        }
+        .loan-badge-pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .loan-badge-approved {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .loan-badge-rejected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .loan-badge-default {
+            background: #f8fafc;
+            color: #334155;
+        }
+        @media only screen and (max-width: 768px) {
+            .pathway-cards {
+                grid-template-columns: 1fr;
+            }
         }
         </style>
         """,
@@ -234,17 +298,25 @@ def update_interest_accumulation(reference_date: Optional[datetime] = None) -> N
 def validate_personal_loan_eligibility(user_id: Optional[str], user_status: Optional[str]) -> Tuple[bool, Optional[str]]:
     if not user_id:
         return False, "User context is missing. Please log in again."
-    if user_status != "Full Member":
-        return False, "Your membership status is not Full Member."
+
+    normalized_status = normalize_membership_status(user_status)
+    if normalized_status != "Full Member":
+        return False, (
+            f"Your current membership status is '{normalized_status or 'Unknown'}'. "
+            "Loan applications are only available to Full Members."
+        )
 
     join_date = st.session_state.get("join_date")
     join_datetime = parse_join_date(join_date)
     if not join_datetime:
-        return False, "Your account join date could not be verified."
+        return False, "Your account join date could not be verified from your profile."
 
     days_since_join = (datetime.utcnow() - join_datetime).days
     if days_since_join < 60:
-        return False, f"Your account is only {days_since_join} days old; it must be at least 60 days old to qualify."
+        return False, (
+            f"Your account is only {days_since_join} days old. "
+            "It must be at least 60 days old to qualify for a loan."
+        )
 
     existing = execute_query(
         "SELECT loan_id FROM loans WHERE member_id = %s AND status IN ('Submitted','Active') ORDER BY applied_date DESC LIMIT 1;",
@@ -280,15 +352,15 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
 
     st.markdown(
         f"""
-        <div style='background: linear-gradient(135deg, #0f4c81 0%, #0f766e 60%, #14b8a6 100%); padding: 24px; border-radius: 24px; box-shadow: 0 22px 50px rgba(15, 76, 129, 0.24); margin-bottom: 24px;'>
-          <div style='display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap;'>
+        <div style='background: linear-gradient(135deg, #0066FF 0%, #1E40AF 100%); border: 1px solid #2563eb; border-radius: 16px; padding: 14px; box-shadow: 0 10px 24px rgba(0, 102, 255, 0.18); margin-bottom: 12px;'>
+          <div style='display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;'>
             <div style='min-width: 0;'>
-              <h1 style='margin: 0; font-size: 2rem; color: #f8fafc;'>Personal Credit Desk</h1>
-              <p style='margin: 12px 0 0; color: #dbeafe; font-size: 1rem;'>Apply for credit, preview repayment, and see your personal loan calculations in real time.</p>
+              <h1 style='margin: 0; font-size: 1.25rem; color: #ffffff;'>Personal Credit Desk</h1>
+              <p style='margin: 4px 0 0; color: #eff6ff; font-size: 0.8rem;'>Apply for credit, preview repayment, and see your personal loan calculations in real time.</p>
             </div>
-            <div style='display: flex; gap: 10px; flex-wrap: wrap;'>
-              <div style='display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border-radius: 999px; background: {membership_color}; color: white; font-weight: 700;'>Membership: {membership_label}</div>
-              <div style='display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border-radius: 999px; background: {activity_color}; color: white; font-weight: 700;'>Activity: {activity_label}</div>
+            <div style='display: flex; gap: 6px; flex-wrap: wrap;'>
+              <div style='display: inline-flex; align-items: center; justify-content: center; padding: 0.2rem 0.55rem; border-radius: 999px; background: {membership_color}; color: white; font-weight: 700; font-size: 0.72rem;'>Membership: {membership_label}</div>
+              <div style='display: inline-flex; align-items: center; justify-content: center; padding: 0.2rem 0.55rem; border-radius: 999px; background: {activity_color}; color: white; font-weight: 700; font-size: 0.72rem;'>Activity: {activity_label}</div>
             </div>
           </div>
         </div>
@@ -296,7 +368,7 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
         unsafe_allow_html=True,
     )
 
-    left_col, right_col = st.columns([5, 5], gap="large")
+    left_col, right_col = st.columns([5, 5], gap="small")
     requested_amount = 5000.0
     purpose = ""
     application_submitted = False
@@ -305,9 +377,9 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
     with left_col:
         st.markdown(
             """
-            <div style='background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px; box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);'>
-              <h3 style='margin-top: 0; font-size: 1.35rem; color: #0f172a;'>Loan Application</h3>
-              <p style='margin: 0 0 16px; color: #475569; font-size: 0.95rem;'>Fill the request details below, then submit when ready. Your eligibility will be checked automatically.</p>
+            <div style='background: #ffffff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 14px 14px 12px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); margin-bottom: 10px;'>
+              <h3 style='margin: 0 0 6px; font-size: 1rem; color: #0f172a;'>Loan Application</h3>
+              <p style='margin: 0; color: #475569; font-size: 0.82rem; line-height: 1.5;'>Fill the request details below, then submit when ready. Your eligibility will be checked automatically.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -330,9 +402,9 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
             )
             st.markdown(
                 """
-                <div style='background: #eef2ff; border-left: 4px solid #3b82f6; border-radius: 14px; padding: 18px; margin: 18px 0;'>
-                  <strong style='display: block; margin-bottom: 8px; font-size: 0.98rem; color: #1e40af;'>Application rules</strong>
-                  <p style='margin: 0; color: #334155; font-size: 0.92rem;'>Membership and account age are validated when you submit. Existing submitted or active loans will pause new applications.</p>
+                <div style='background: #f8f9fa; border-left: 4px solid #2563eb; border-radius: 10px; padding: 10px; margin: 10px 0;'>
+                  <strong style='display: block; margin-bottom: 4px; font-size: 0.8rem; color: #1e40af;'>Application rules</strong>
+                  <p style='margin: 0; color: #334155; font-size: 0.78rem;'>Membership and account age are validated when you submit. Existing submitted or active loans will pause new applications.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -353,39 +425,57 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
                         fetch=False,
                     )
                     st.success("Loan application submitted successfully. A leadership review will follow.")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Failed to submit application: {e}")
+
+        latest_loan = fetch_latest_member_loan(user_id)
+        if latest_loan:
+            st.markdown(
+                f"""
+                <div class='form-card'>
+                  <div style='display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;'>
+                    <div style='font-size:0.8rem; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; color:#64748b;'>Latest Application</div>
+                    {render_loan_status_badge(latest_loan.get('status'))}
+                  </div>
+                  <div style='color:#0f172a; font-size:0.95rem; font-weight:700;'>UGX {float(latest_loan.get('amount_requested') or 0):,.0f}</div>
+                  <div style='margin-top:6px; color:#334155; font-size:0.8rem;'>Applied: {latest_loan.get('applied_date') or 'Unknown'}</div>
+                  <div style='margin-top:4px; color:#334155; font-size:0.8rem;'>Review: {latest_loan.get('approved_by') or 'Awaiting review by leadership'}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     with right_col:
         interest_amount = requested_amount * 0.10
         total_payback = requested_amount + interest_amount
         st.markdown(
             f"""
-            <div style='background: linear-gradient(180deg, #f8fafc 0%, #dbeafe 100%); border: 1px solid #c7d2fe; border-radius: 20px; padding: 24px; box-shadow: 0 14px 30px rgba(59, 130, 246, 0.12);'>
-              <div style='display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap;'>
+            <div style='background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);'>
+              <div style='display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap;'>
                 <div>
-                  <div style='font-size: 0.78rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #1d4ed8;'>Dynamic Calculator</div>
-                  <h3 style='margin: 4px 0 0; font-size: 1.45rem; color: #1e3a8a;'>Repayment Preview</h3>
+                  <div style='font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b;'>Dynamic Calculator</div>
+                  <h3 style='margin: 2px 0 0; font-size: 1rem; color: #0f172a;'>Repayment Preview</h3>
                 </div>
-                <div style='background: rgba(59, 130, 246, 0.12); padding: 8px 12px; border-radius: 999px; color: #1d4ed8; font-weight: 700;'>10% estimate</div>
+                <div style='background: #f8f9fa; padding: 0.2rem 0.55rem; border-radius: 999px; color: #2563eb; font-weight: 700; font-size: 0.72rem;'>10% estimate</div>
               </div>
 
-              <div style='margin-top: 22px; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px;'>
-                <div style='background: #ffffff; border: 1px solid rgba(59, 130, 246, 0.16); border-radius: 16px; padding: 16px;'>
-                  <div style='font-size: 0.82rem; color: #1e3a8a; margin-bottom: 6px;'>Principal</div>
-                  <div style='font-size: 1.45rem; font-weight: 700; color: #1d4ed8;'>UGX {requested_amount:,.0f}</div>
+              <div style='margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;'>
+                <div style='background: #f8f9fa; border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px;'>
+                  <div style='font-size: 0.7rem; color: #64748b; margin-bottom: 4px;'>Principal</div>
+                  <div style='font-size: 0.95rem; font-weight: 700; color: #0f172a;'>UGX {requested_amount:,.0f}</div>
                 </div>
-                <div style='background: #ffffff; border: 1px solid rgba(59, 130, 246, 0.16); border-radius: 16px; padding: 16px;'>
-                  <div style='font-size: 0.82rem; color: #1e3a8a; margin-bottom: 6px;'>Estimated Interest</div>
-                  <div style='font-size: 1.45rem; font-weight: 700; color: #2563eb;'>UGX {interest_amount:,.0f}</div>
+                <div style='background: #f8f9fa; border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px;'>
+                  <div style='font-size: 0.7rem; color: #64748b; margin-bottom: 4px;'>Estimated Interest</div>
+                  <div style='font-size: 0.95rem; font-weight: 700; color: #2563eb;'>UGX {interest_amount:,.0f}</div>
                 </div>
-                <div style='background: #eff6ff; border: 1px solid rgba(37, 99, 235, 0.22); border-radius: 16px; padding: 16px;'>
-                  <div style='font-size: 0.82rem; color: #1d4ed8; margin-bottom: 6px;'>Total Payback</div>
-                  <div style='font-size: 1.55rem; font-weight: 800; color: #1e40af;'>UGX {total_payback:,.0f}</div>
+                <div style='background: #f8f9fa; border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px;'>
+                  <div style='font-size: 0.7rem; color: #64748b; margin-bottom: 4px;'>Total Payback</div>
+                  <div style='font-size: 1rem; font-weight: 800; color: #0f172a;'>UGX {total_payback:,.0f}</div>
                 </div>
               </div>
 
-              <div style='margin-top: 18px; color: #334155; font-size: 0.95rem; line-height: 1.6;'>Your repayment preview updates automatically when you change the loan amount. This is an estimated 10% interest model for planning purposes.</div>
+              <div style='margin-top: 10px; color: #334155; font-size: 0.78rem; line-height: 1.45;'>Your repayment preview updates automatically when you change the loan amount. This is an estimated 10% interest model for planning purposes.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -395,9 +485,9 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
 def render_executive_credit_control(user_role: str) -> None:
     st.markdown(
         """
-        <div style='background: linear-gradient(135deg, #065f46 0%, #047857 55%, #10b981 100%); padding: 24px; border-radius: 24px; box-shadow: 0 20px 46px rgba(6, 95, 70, 0.22); margin-bottom: 20px;'>
-          <h2 style='margin: 0; font-size: 1.8rem; color: #f0fdf4;'>Executive Credit Control</h2>
-          <p style='margin: 10px 0 0; color: #dcfce7; font-size: 1rem;'>Monitor portfolio health, protect lending standards, and guide approvals with confidence.</p>
+        <div style='background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); margin-bottom: 10px;'>
+          <h2 style='margin: 0; font-size: 1.1rem; color: #0f172a;'>Executive Credit Control</h2>
+          <p style='margin: 4px 0 0; color: #64748b; font-size: 0.8rem;'>Monitor portfolio health, protect lending standards, and guide approvals with confidence.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -417,18 +507,18 @@ def render_executive_credit_control(user_role: str) -> None:
     )
 
     metrics = execute_query(
-        "SELECT status, COUNT(*) AS count FROM loans WHERE status IN ('Submitted','Active','Approved') GROUP BY status;",
+        "SELECT status, COUNT(*) AS count FROM loans WHERE status IN ('Submitted','Approved','Rejected') GROUP BY status;",
         params=None,
         fetch=True,
     )
     totals = {row["status"]: int(row["count"] or 0) for row in metrics} if metrics else {}
     pending_count = totals.get("Submitted", 0)
-    active_count = totals.get("Active", 0)
     approved_count = totals.get("Approved", 0)
+    rejected_count = totals.get("Rejected", 0)
 
     status_filter = st.selectbox(
         "Executive vitals view",
-        ["Overview", "Submitted", "Active", "Approved"],
+        ["Overview", "Submitted", "Approved", "Rejected"],
         index=0,
         help="Switch the portfolio snapshot to a specific loan status.",
     )
@@ -436,16 +526,16 @@ def render_executive_credit_control(user_role: str) -> None:
     st.markdown(
         f"""
         <div class='vitals-panel'>
-          <div style='display:flex; flex-wrap:wrap; gap:8px; margin-bottom: 14px;'>
+          <div style='display:flex; flex-wrap:wrap; gap:6px; margin-bottom: 10px;'>
             <span class='status-choice active'>Status focus: {status_filter}</span>
             <span class='status-choice'>Pending: {pending_count}</span>
-            <span class='status-choice'>Active: {active_count}</span>
             <span class='status-choice'>Approved: {approved_count}</span>
+            <span class='status-choice'>Rejected: {rejected_count}</span>
           </div>
-          <div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;'>
-            <div style='padding: 14px; border-radius: 16px; background:white; border:1px solid #e2e8f0;'><div style='font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:#64748b;'>Submitted</div><div style='margin-top:6px; font-size:1.35rem; font-weight:800; color:#0f172a;'>{pending_count}</div></div>
-            <div style='padding: 14px; border-radius: 16px; background:white; border:1px solid #e2e8f0;'><div style='font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:#64748b;'>Active</div><div style='margin-top:6px; font-size:1.35rem; font-weight:800; color:#0f172a;'>{active_count}</div></div>
-            <div style='padding: 14px; border-radius: 16px; background:white; border:1px solid #e2e8f0;'><div style='font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:#64748b;'>Signed approvals</div><div style='margin-top:6px; font-size:1.35rem; font-weight:800; color:#0f172a;'>{approved_count}</div></div>
+          <div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;'>
+            <div style='padding: 8px; border-radius: 10px; background:#f8f9fa; border:1px solid #e5e7eb;'><div style='font-size:0.7rem; text-transform:uppercase; letter-spacing:0.08em; color:#64748b;'>Submitted</div><div style='margin-top:4px; font-size:1rem; font-weight:800; color:#0f172a;'>{pending_count}</div></div>
+            <div style='padding: 8px; border-radius: 10px; background:#f8f9fa; border:1px solid #e5e7eb;'><div style='font-size:0.7rem; text-transform:uppercase; letter-spacing:0.08em; color:#64748b;'>Approved</div><div style='margin-top:4px; font-size:1rem; font-weight:800; color:#0f172a;'>{approved_count}</div></div>
+            <div style='padding: 8px; border-radius: 10px; background:#f8f9fa; border:1px solid #e5e7eb;'><div style='font-size:0.7rem; text-transform:uppercase; letter-spacing:0.08em; color:#64748b;'>Rejected</div><div style='margin-top:4px; font-size:1rem; font-weight:800; color:#0f172a;'>{rejected_count}</div></div>
           </div>
         </div>
         """,
@@ -454,12 +544,23 @@ def render_executive_credit_control(user_role: str) -> None:
 
     st.markdown("---")
     st.markdown("### Group Application Processing")
-    active_loans = execute_query(
+    active_loans_query = (
         "SELECT loan_id, member_id, amount_requested, outstanding_balance, status, applied_date, approved_by "
-        "FROM loans WHERE status IN ('Submitted','Active') ORDER BY applied_date ASC;",
-        params=None,
-        fetch=True,
+        "FROM loans WHERE status IN ('Submitted','Approved','Rejected')"
     )
+    if status_filter != "Overview":
+        active_loans_query += " AND status = %s"
+        active_loans = execute_query(
+            active_loans_query + " ORDER BY applied_date ASC;",
+            params=(status_filter,),
+            fetch=True,
+        )
+    else:
+        active_loans = execute_query(
+            active_loans_query + " ORDER BY applied_date ASC;",
+            params=None,
+            fetch=True,
+        )
 
     if not active_loans:
         st.info("No group applications are currently in process.")
@@ -469,33 +570,46 @@ def render_executive_credit_control(user_role: str) -> None:
             with card_cols[0]:
                 st.markdown(
                     f"""
-                    <div style='background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 18px; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.05);'>
-                      <div style='display: flex; justify-content: space-between; gap: 12px; align-items: center;'>
+                    <div style='background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);'>
+                      <div style='display: flex; justify-content: space-between; gap: 10px; align-items: center;'>
                         <div>
-                          <div style='font-size: 0.9rem; font-weight: 700; color: #1e3a8a;'>Loan {loan["loan_id"]} · {loan["status"]}</div>
-                          <div style='margin-top: 6px; color: #475569; font-size: 0.92rem;'>Member: {loan["member_id"]} · Requested UGX {float(loan.get("amount_requested") or loan.get("outstanding_balance") or 0):,.0f}</div>
+                          <div style='font-size: 0.82rem; font-weight: 700; color: #2563eb;'>Loan {loan["loan_id"]} · {loan["status"]}</div>
+                          <div style='margin-top: 4px; color: #475569; font-size: 0.78rem;'>Member: {loan["member_id"]} · Requested UGX {float(loan.get("amount_requested") or loan.get("outstanding_balance") or 0):,.0f}</div>
                         </div>
-                        <div style='background: rgba(59, 130, 246, 0.08); color: #1d4ed8; padding: 8px 12px; border-radius: 999px; font-weight: 700;'>{loan["status"]}</div>
+                        <div>{render_loan_status_badge(loan.get("status"))}</div>
                       </div>
-                      <div style='margin-top: 16px; color: #334155; font-size: 0.92rem;'>Applied: {loan["applied_date"] or 'Unknown'} · Approved by: {loan.get("approved_by") or 'Pending'}</div>
+                      <div style='margin-top: 8px; color: #334155; font-size: 0.76rem;'>Applied: {loan["applied_date"] or 'Unknown'} · Review: {loan.get("approved_by") or 'Awaiting review'}</div>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
             with card_cols[1]:
                 if loan["status"] == "Submitted":
-                    if st.button("Activate Loan", key=f"exec_activate_{loan['loan_id']}"):
+                    approve_col, reject_col = st.columns(2)
+                    if approve_col.button("Approve", key=f"exec_approve_{loan['loan_id']}"):
                         try:
                             execute_query(
-                                "UPDATE loans SET status = 'Active', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
+                                "UPDATE loans SET status = 'Approved', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
                                 params=(user_role, datetime.utcnow(), loan["loan_id"]),
                                 fetch=False,
                             )
-                            st.success("Loan activated.")
+                            st.success("Loan approved.")
+                            st.rerun()
                         except Exception as e:
-                            st.error(f"Failed to activate loan: {e}")
+                            st.error(f"Failed to approve loan: {e}")
+                    if reject_col.button("Reject", key=f"exec_reject_{loan['loan_id']}"):
+                        try:
+                            execute_query(
+                                "UPDATE loans SET status = 'Rejected', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
+                                params=(user_role, datetime.utcnow(), loan["loan_id"]),
+                                fetch=False,
+                            )
+                            st.success("Loan rejected.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to reject loan: {e}")
                 else:
-                    st.button("Active", key=f"exec_active_{loan['loan_id']}", disabled=True)
+                    st.caption(f"{loan['status']} by {loan.get('approved_by') or 'reviewer'}")
 
     st.markdown("---")
     st.markdown("### Institutional Audit Log")
@@ -507,7 +621,12 @@ def render_executive_credit_control(user_role: str) -> None:
     )
     if audit_rows:
         audit_df = pd.DataFrame(audit_rows)
-        st.dataframe(audit_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            audit_df,
+            width="stretch",
+            hide_index=True,
+            column_config={column: {"width": "small"} for column in audit_df.columns},
+        )
     else:
         st.info("No audit signatures have been recorded yet.")
 
@@ -522,7 +641,8 @@ def loans_view() -> None:
         """,
         unsafe_allow_html=True,
     )
-    update_interest_accumulation()
+    with st.spinner("Loading data..."):
+        update_interest_accumulation()
 
     user_role = st.session_state.get("user_role")
     user_id = st.session_state.get("user_id")

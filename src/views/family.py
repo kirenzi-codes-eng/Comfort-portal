@@ -6,304 +6,217 @@ import streamlit as st
 from src.database.connection import execute_query
 
 
+def _build_family_records_query() -> str:
+    """Build the family records query with PostgreSQL-safe quoted aliases."""
+    return (
+        'SELECT id, relationship_type AS "Relationship", full_legal_name AS "Full Name", '
+        'primary_contact AS "Contact", vital_status AS "Vital Status" '
+        'FROM family_registry WHERE member_id = %s ORDER BY relationship_type, full_legal_name;'
+    )
+
+
 def _render_professional_styles() -> None:
-    """Render comprehensive professional CSS styles for the family registry."""
+    """Render compact responsive CSS styles for the family registry."""
     st.markdown("""
         <style>
             * {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+                font-family: 'Inter', sans-serif;
             }
-            
-            /* ========== PROFESSIONAL HEADER BANNER ========== */
+
             .registry-banner {
-                background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%);
-                color: white;
-                padding: 2rem 2.5rem;
-                border-radius: 8px;
-                margin-bottom: 2rem;
-                box-shadow: 0 10px 30px rgba(15, 23, 42, 0.3);
+                background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+                color: #166534;
+                padding: 12px 14px;
+                border-radius: 12px;
+                margin-bottom: 10px;
+                box-shadow: 0 8px 24px rgba(22, 101, 52, 0.12);
+                border: 1px solid #86efac;
             }
-            
+
             .registry-banner h1 {
                 margin: 0;
-                font-size: 2.25rem;
-                font-weight: 700;
-                letter-spacing: -0.5px;
-                color: white;
+                font-size: 1.25rem;
+                font-weight: 800;
+                letter-spacing: -0.02em;
+                color: #15803d;
             }
-            
+
             .registry-banner p {
-                margin: 0.5rem 0 0 0;
-                font-size: 1rem;
-                opacity: 0.95;
-                color: #e0e7ff;
+                margin: 4px 0 0 0;
+                font-size: 0.8rem;
+                color: #166534;
             }
-            
-            /* ========== REGISTRY PANEL CARDS ========== */
+
             .registry-panel-card {
-                background: white;
-                border: 1px solid #E2E8F0;
-                border-radius: 8px;
-                padding: 1.75rem;
-                margin-bottom: 1.5rem;
-                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-                transition: all 0.3s ease;
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 12px;
+                margin-bottom: 10px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
             }
-            
-            .registry-panel-card:hover {
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-                border-color: #CBD5E1;
-            }
-            
+
             .registry-panel-card h3 {
-                margin: 0 0 1.5rem 0;
-                font-size: 1.1rem;
-                font-weight: 600;
-                color: #0F172A;
-                border-bottom: 2px solid #1E3A8A;
-                padding-bottom: 0.75rem;
-                letter-spacing: 0.3px;
+                margin: 0 0 8px 0;
+                font-size: 0.95rem;
+                font-weight: 700;
+                color: #0f172a;
+                padding-bottom: 0.4rem;
             }
-            
-            /* ========== FORM LAYOUT ========== */
-            .form-row {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 1.5rem;
-                margin-bottom: 1.25rem;
-            }
-            
-            .form-group {
-                display: flex;
-                flex-direction: column;
-            }
-            
+
             .form-label {
-                font-size: 0.85rem;
-                font-weight: 600;
-                color: #475569;
-                margin-bottom: 0.5rem;
+                font-size: 0.75rem;
+                font-weight: 700;
+                color: #64748b;
+                margin-bottom: 0.3rem;
                 text-transform: uppercase;
-                letter-spacing: 0.5px;
+                letter-spacing: 0.06em;
             }
-            
+
             .form-label.required::after {
                 content: ' *';
-                color: #e11d48;
+                color: #dc3545;
                 font-weight: 700;
             }
-            
-            /* ========== TABLE STYLES ========== */
+
             .family-table-container {
-                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                background: #ffffff;
                 border-radius: 12px;
-                padding: 1.5rem;
-                margin: 1.5rem 0;
-                box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+                padding: 0.5rem;
+                margin: 0.5rem 0 0.8rem;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+                border: 1px solid #e5e7eb;
+                overflow-x: auto;
             }
-            
+
             .family-table {
                 width: 100%;
                 border-collapse: collapse;
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-size: 0.75rem;
             }
-            
+
             .family-table thead {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
+                background: #f8f9fa;
+                color: #0f172a;
+                font-weight: 700;
             }
-            
-            .family-table th {
-                padding: 1rem 1.25rem;
-                text-align: left;
-                border-bottom: 3px solid #667eea;
-                font-size: 0.9rem;
-            }
-            
-            .family-table tbody tr {
-                background: white;
-                border-bottom: 1px solid #e0e6ed;
-                transition: all 0.3s ease;
-            }
-            
-            .family-table tbody tr:hover {
-                background: linear-gradient(90deg, #f0f4ff 0%, #ffffff 100%);
-                box-shadow: inset 0 2px 4px rgba(102, 126, 234, 0.1);
-                transform: translateX(2px);
-            }
-            
-            .family-table tbody tr:nth-child(even) {
-                background: #f9fafb;
-            }
-            
-            .family-table tbody tr:nth-child(even):hover {
-                background: linear-gradient(90deg, #f0f4ff 0%, #f9fafb 100%);
-            }
-            
+
+            .family-table th,
             .family-table td {
-                padding: 1rem 1.25rem;
-                font-size: 0.95rem;
-                color: #2d3748;
+                padding: 0.45rem 0.5rem;
+                text-align: left;
+                border-bottom: 1px solid #e5e7eb;
             }
-            
+
             .relationship-badge {
                 display: inline-block;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 0.4rem 0.8rem;
-                border-radius: 20px;
-                font-weight: 600;
-                font-size: 0.85rem;
-                min-width: 90px;
+                background: #f8f9fa;
+                color: #2563eb;
+                padding: 0.2rem 0.55rem;
+                border-radius: 999px;
+                font-weight: 700;
+                font-size: 0.72rem;
+                min-width: 80px;
                 text-align: center;
             }
-            
+
             .status-alive {
                 display: inline-flex;
                 align-items: center;
-                gap: 0.5rem;
-                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-                color: white;
-                padding: 0.5rem 1rem;
-                border-radius: 20px;
-                font-weight: 600;
-                font-size: 0.85rem;
-                box-shadow: 0 4px 8px rgba(17, 153, 142, 0.3);
+                gap: 0.3rem;
+                background: #eafaf0;
+                color: #28a745;
+                padding: 0.2rem 0.55rem;
+                border-radius: 999px;
+                font-weight: 700;
+                font-size: 0.72rem;
             }
-            
+
             .status-deceased {
                 display: inline-flex;
                 align-items: center;
-                gap: 0.5rem;
-                background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
-                color: white;
-                padding: 0.5rem 1rem;
-                border-radius: 20px;
-                font-weight: 600;
-                font-size: 0.85rem;
-                box-shadow: 0 4px 8px rgba(235, 51, 73, 0.3);
+                gap: 0.3rem;
+                background: #fdecee;
+                color: #dc3545;
+                padding: 0.2rem 0.55rem;
+                border-radius: 999px;
+                font-weight: 700;
+                font-size: 0.72rem;
             }
-            
-            .contact-info {
-                color: #667eea;
-                font-weight: 500;
-                font-family: 'Courier New', monospace;
-            }
-            
-            .name-cell {
-                color: #2d3748;
-                font-weight: 600;
-                font-size: 0.96rem;
-            }
-            
-            /* ========== INFO BOX ========== */
+
             .registry-info-box {
-                background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-                border-left: 4px solid #f59e0b;
-                padding: 1rem 1.25rem;
-                border-radius: 6px;
-                margin-bottom: 1.5rem;
-                font-size: 0.95rem;
-                color: #92400e;
-                line-height: 1.5;
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-left: 3px solid #2563eb;
+                padding: 10px 12px;
+                border-radius: 10px;
+                margin-bottom: 10px;
+                font-size: 0.8rem;
+                color: #334155;
+                line-height: 1.45;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
             }
-            
-            /* ========== BUTTON STYLING ========== */
-            .submit-button {
-                background: linear-gradient(135deg, #1E3A8A 0%, #0F172A 100%);
-                color: white;
-                padding: 0.75rem 2rem;
-                border-radius: 6px;
-                font-weight: 600;
-                font-size: 0.95rem;
-                border: none;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                margin-top: 1.5rem;
+
+            .registry-print-sheet {
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 14px;
+                padding: 14px 16px;
+                margin: 0.7rem 0 0.9rem;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
             }
-            
-            .submit-button:hover {
-                box-shadow: 0 8px 16px rgba(15, 23, 42, 0.3);
-                transform: translateY(-2px);
+
+            .registry-print-header {
+                border-bottom: 1px solid #e5e7eb;
+                padding-bottom: 8px;
+                margin-bottom: 8px;
             }
-            
-            /* ========== MOBILE RESPONSIVENESS (< 768px) ========== */
-            @media (max-width: 768px) {
+
+            .registry-print-header h3 {
+                margin: 0 0 4px 0;
+                color: #0f172a;
+                font-size: 1rem;
+            }
+
+            .registry-print-meta {
+                font-size: 0.8rem;
+                color: #64748b;
+                margin-bottom: 8px;
+            }
+
+            .registry-print-row {
+                display: flex;
+                justify-content: space-between;
+                gap: 0.5rem;
+                padding: 6px 0;
+                border-bottom: 1px solid #f1f5f9;
+                font-size: 0.84rem;
+            }
+
+            .registry-print-label {
+                font-weight: 700;
+                color: #334155;
+                min-width: 120px;
+            }
+
+            .registry-print-value {
+                color: #0f172a;
+                text-align: right;
+                flex: 1;
+            }
+
+            @media only screen and (max-width: 768px) {
                 .registry-banner {
-                    padding: 1.5rem 1.25rem;
+                    padding: 10px 12px;
                 }
-                
-                .registry-banner h1 {
-                    font-size: 1.75rem;
-                }
-                
-                .registry-banner p {
-                    font-size: 0.9rem;
-                }
-                
+
                 .registry-panel-card {
-                    padding: 1.25rem;
-                    margin-bottom: 1rem;
+                    padding: 10px;
                 }
-                
-                .registry-panel-card h3 {
-                    font-size: 1rem;
-                    margin-bottom: 1rem;
-                    padding-bottom: 0.5rem;
-                }
-                
-                .form-row {
-                    grid-template-columns: 1fr;
-                    gap: 1rem;
-                    margin-bottom: 1rem;
-                }
-                
-                .form-label {
-                    font-size: 0.8rem;
-                    margin-bottom: 0.4rem;
-                }
-                
-                input[type="text"],
-                input[type="number"],
-                select {
-                    font-size: 16px !important;
-                    padding: 0.6rem !important;
-                }
-                
-                .family-table {
-                    font-size: 0.85rem;
-                }
-                
+
                 .family-table th,
                 .family-table td {
-                    padding: 0.75rem 0.5rem !important;
-                }
-                
-                .relationship-badge,
-                .status-alive,
-                .status-deceased {
-                    font-size: 0.75rem;
-                    padding: 0.35rem 0.6rem;
-                }
-                
-                .registry-info-box {
-                    padding: 0.75rem 1rem;
-                    font-size: 0.85rem;
-                    margin-bottom: 1rem;
-                }
-            }
-            
-            /* ========== TABLET RESPONSIVENESS (768px - 1024px) ========== */
-            @media (max-width: 1024px) and (min-width: 769px) {
-                .form-row {
-                    grid-template-columns: 1fr;
-                }
-                
-                .registry-banner h1 {
-                    font-size: 1.85rem;
+                    padding: 0.35rem 0.4rem !important;
                 }
             }
         </style>
@@ -311,55 +224,107 @@ def _render_professional_styles() -> None:
 
 
 def _render_styled_family_table(records: list[dict]) -> None:
-    """Render a beautifully styled HTML table for family records."""
+    """Render family records as vertically labeled cards in the requested order."""
     _render_professional_styles()
-    
+
     if not records:
         st.info("No family records found.")
         return
-    
-    # Build HTML table
+
     html_rows = ""
     for record in records:
-        relationship = record.get("Relationship", "")
-        name = record.get("Full Name", "")
-        contact = record.get("Contact", "N/A")
-        vital_status = record.get("Vital Status", "Alive")
-        
-        # Status badge styling
-        if vital_status == "Alive":
-            status_html = f'<div class="status-alive">🟢 Alive</div>'
+        relationship = record.get("Relationship") or record.get("relationship_type") or ""
+        name = record.get("Full Name") or record.get("full_legal_name") or ""
+        contact = record.get("Contact") or record.get("primary_contact") or "N/A"
+        vital_status = record.get("Vital Status") or record.get("vital_status") or "Alive"
+
+        if str(vital_status).strip().lower() == "alive":
+            status_html = '<div class="status-alive">🟢 Alive</div>'
         else:
-            status_html = f'<div class="status-deceased">⚫ Deceased</div>'
-        
+            status_html = '<div class="status-deceased">⚫ Deceased</div>'
+
         html_rows += f"""
-        <tr>
-            <td><div class="relationship-badge">{relationship}</div></td>
-            <td><div class="name-cell">{name}</div></td>
-            <td><div class="contact-info">{contact}</div></td>
-            <td>{status_html}</td>
-        </tr>
+        <div class="registry-panel-card">
+            <div class="registry-print-row">
+                <div class="registry-print-label">NAME</div>
+                <div class="registry-print-value">{name}</div>
+            </div>
+            <div class="registry-print-row">
+                <div class="registry-print-label">CONTACT</div>
+                <div class="registry-print-value">{contact}</div>
+            </div>
+            <div class="registry-print-row">
+                <div class="registry-print-label">RELATIONSHIP</div>
+                <div class="registry-print-value"><div class="relationship-badge">{relationship}</div></div>
+            </div>
+            <div class="registry-print-row">
+                <div class="registry-print-label">STATUS</div>
+                <div class="registry-print-value">{status_html}</div>
+            </div>
+        </div>
         """
-    
+
     html_table = f"""
     <div class="family-table-container">
-        <table class="family-table">
-            <thead>
-                <tr>
-                    <th>Relationship</th>
-                    <th>Full Name</th>
-                    <th>Contact</th>
-                    <th>Vital Status</th>
-                </tr>
-            </thead>
-            <tbody>
-                {html_rows}
-            </tbody>
-        </table>
+        {html_rows}
     </div>
     """
-    
+
     st.markdown(html_table, unsafe_allow_html=True)
+
+
+def _render_printable_family_sheet(records: list[dict], title: str = "Family Registry Summary") -> None:
+    """Render a simple, readable family registry summary for members and admins."""
+    _render_professional_styles()
+
+    if not records:
+        st.info("No family records available to print yet.")
+        return
+
+    member_name = st.session_state.get("user_name") or st.session_state.get("member_name") or "Member"
+    generated_on = datetime.utcnow().strftime("%d %b %Y")
+
+    st.markdown(f"### {title}")
+    st.caption(f"Prepared for {member_name} • Generated on {generated_on}")
+
+    for record in records:
+        relationship = record.get("Relationship") or record.get("relationship_type") or ""
+        name = record.get("Full Name") or record.get("full_legal_name") or ""
+        contact = record.get("Contact") or record.get("primary_contact") or "N/A"
+        vital_status = record.get("Vital Status") or record.get("vital_status") or "Alive"
+
+        with st.container():
+            st.write(f"**{relationship.upper()}**")
+            st.write(f"Name: {name}")
+            st.write(f"Contact: {contact}")
+            st.write(f"Status: {vital_status}")
+            st.write("")
+
+
+def _ensure_family_registry_schema() -> None:
+    """Create the family_registry table and required columns when missing."""
+    create_table_sql = """
+    CREATE TABLE IF NOT EXISTS family_registry (
+        id BIGSERIAL PRIMARY KEY,
+        member_id TEXT NOT NULL,
+        relationship_type TEXT,
+        full_legal_name TEXT,
+        primary_contact TEXT,
+        vital_status TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+    execute_query(create_table_sql, params=None, fetch=False)
+
+    for column_sql in [
+        "ALTER TABLE family_registry ADD COLUMN IF NOT EXISTS member_id TEXT;",
+        "ALTER TABLE family_registry ADD COLUMN IF NOT EXISTS relationship_type TEXT;",
+        "ALTER TABLE family_registry ADD COLUMN IF NOT EXISTS full_legal_name TEXT;",
+        "ALTER TABLE family_registry ADD COLUMN IF NOT EXISTS primary_contact TEXT;",
+        "ALTER TABLE family_registry ADD COLUMN IF NOT EXISTS vital_status TEXT;",
+        "ALTER TABLE family_registry ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+    ]:
+        execute_query(column_sql, params=None, fetch=False)
 
 
 def family_view() -> None:
@@ -370,6 +335,23 @@ def family_view() -> None:
 
     user_role = st.session_state.get("user_role", "Member")
     allowed_vitals_managers = ["Chairperson", "Welfare"]
+    executive_view_roles = ["Chairperson", "Secretary", "Welfare", "Treasurer", "Vice Chairperson"]
+
+    if user_role in executive_view_roles:
+        member_rows = execute_query(
+            "SELECT member_id, full_name FROM members ORDER BY full_name;",
+            params=None,
+            fetch=True,
+        ) or []
+        member_options = [f"{r.get('full_name') or 'Unnamed'} ({r.get('member_id')})" for r in member_rows]
+        member_map = {f"{r.get('full_name') or 'Unnamed'} ({r.get('member_id')})": r.get('member_id') for r in member_rows}
+        if member_options:
+            selected_member_label = st.selectbox(
+                "Select member to view family tree",
+                options=member_options,
+                key="family_tree_member_select",
+            )
+            raw_member = member_map.get(selected_member_label, raw_member)
 
     # Render professional styles
     _render_professional_styles()
@@ -382,57 +364,81 @@ def family_view() -> None:
         </div>
     """, unsafe_allow_html=True)
 
-    def resolve_member_pk(member_id_value: str | int) -> int | None:
-        if isinstance(member_id_value, int):
-            return member_id_value
-        if isinstance(member_id_value, str) and member_id_value.isdigit():
-            return int(member_id_value)
-        query = "SELECT id FROM members WHERE member_id = %s LIMIT 1;"
-        rows = execute_query(query, params=(member_id_value,), fetch=True)
+    def resolve_member_identifier(member_id_value: str | int) -> str | None:
+        if isinstance(member_id_value, str) and member_id_value.strip() and not member_id_value.isdigit():
+            return member_id_value.strip()
+
+        query = "SELECT member_id FROM members WHERE id = %s OR member_id = %s LIMIT 1;"
+        rows = execute_query(query, params=(member_id_value, str(member_id_value)), fetch=True)
         if rows:
-            return rows[0].get("id")
+            return rows[0].get("member_id")
         return None
 
-    member_pk = resolve_member_pk(raw_member)
-    if member_pk is None:
-        st.error("Your member profile could not be resolved to an active numeric member ID. Please contact support.")
+    member_identifier = resolve_member_identifier(raw_member)
+    if member_identifier is None:
+        st.error("Your member profile could not be resolved to an active member identifier. Please contact support.")
         return
 
-    def fetch_family_records(member_pk_value: int) -> list[dict]:
-        query = (
-            "SELECT id, relationship_type AS Relationship, full_legal_name AS \"Full Name\", primary_contact AS Contact, vital_status AS \"Vital Status\" "
-            "FROM family_registry WHERE member_id = %s ORDER BY relationship_type, full_legal_name;"
-        )
+    try:
+        _ensure_family_registry_schema()
+    except Exception:
+        st.warning("The family registry schema could not be initialized automatically. Please contact support if records fail to load.")
+
+    def fetch_family_records(member_id_value: str) -> list[dict]:
+        query = _build_family_records_query()
         try:
-            return execute_query(query, params=(member_pk_value,), fetch=True) or []
-        except Exception as exc:
+            return execute_query(query, params=(member_id_value,), fetch=True) or []
+        except Exception:
             st.error("Unable to load family registry records at this time.")
             return []
 
-    def insert_family_records(member_pk_value: int, entries: list[tuple[str, str, str, str]]) -> None:
+    def insert_family_records(member_pk_value: str, entries: list[tuple[str, str, str, str]]) -> None:
         insert_sql = (
             "INSERT INTO family_registry (member_id, relationship_type, full_legal_name, primary_contact, vital_status, created_at) "
             "VALUES (%s, %s, %s, %s, %s, %s);"
         )
+        # Perform bulk insert in a single query to avoid per-row roundtrips.
+        if not entries:
+            return
+        # Build a multi-row VALUES clause with parameter placeholders
+        values_placeholders = []
+        params: list = []
         for relationship_type, full_legal_name, primary_contact, vital_status in entries:
-            execute_query(
-                insert_sql,
-                params=(member_pk_value, relationship_type, full_legal_name, primary_contact, vital_status, datetime.utcnow()),
-                fetch=False,
-            )
+            values_placeholders.append("(%s, %s, %s, %s, %s, %s)")
+            params.extend([member_pk_value, relationship_type, full_legal_name, primary_contact, vital_status, datetime.utcnow()])
 
-    records = fetch_family_records(member_pk)
+        multi_insert_sql = (
+            "INSERT INTO family_registry (member_id, relationship_type, full_legal_name, primary_contact, vital_status, created_at) VALUES "
+            + ", ".join(values_placeholders)
+            + ";"
+        )
+        execute_query(multi_insert_sql, params=tuple(params), fetch=False)
+
+    def update_family_records(updates: list[tuple[str, str, str, int]]) -> None:
+        update_sql = (
+            "UPDATE family_registry SET full_legal_name = %s, primary_contact = %s, vital_status = %s "
+            "WHERE id = %s;"
+        )
+        for full_name, primary_contact, vital_status, record_id in updates:
+            execute_query(update_sql, params=(full_name, primary_contact, vital_status, record_id), fetch=False)
+
+    records = fetch_family_records(member_identifier)
     has_records = len(records) > 0
+    edit_mode = st.session_state.get("family_registry_edit_mode", False)
 
     # =====================================================================
     # VIEW A: FRESH INITIAL SUBMISSION WORKSPACE (UNLOCKED)
     # =====================================================================
     if not has_records:
+        preview_records = st.session_state.get("family_registry_preview_entries") or []
+        if preview_records:
+            st.markdown("<div class='registry-info-box'><strong>✅ Your submitted family registry is ready to view</strong><br>Below is the printable summary of the information you just submitted.</div>", unsafe_allow_html=True)
+            _render_printable_family_sheet(preview_records, title="Submitted Family Registry Sheet")
+            st.markdown("<div class='registry-info-box'><strong>Note:</strong> Use your browser's print option to print this sheet for your records.</div>", unsafe_allow_html=True)
+
         st.markdown("""
             <div class="registry-info-box">
-                <strong>📋 Registry Information:</strong><br>
-                Please fill out your complete family tree records below. Verify all information carefully before submission—once saved, modifications require executive review from Chairperson or Welfare Officer.
-            </div>
+                    <strong>Registry Information</strong><br>
         """, unsafe_allow_html=True)
 
         # Define a small rerun helper (used by the children selector)
@@ -541,7 +547,7 @@ def family_view() -> None:
 
             col1, col2 = st.columns([1, 1])
             with col1:
-                submit_family = st.form_submit_button("🔒 Securely Commit Family Registry", use_container_width=True)
+                submit_family = st.form_submit_button("🔒 Securely Commit Family Registry", width='stretch')
 
             if submit_family:
                 if not nok or not nok_tel:
@@ -575,7 +581,16 @@ def family_view() -> None:
                         st.error("❌ No valid family entries were provided. Please ensure at least Next of Kin information is filled.")
                     else:
                         try:
-                            insert_family_records(member_pk, entries)
+                            insert_family_records(member_identifier, entries)
+                            st.session_state["family_registry_preview_entries"] = [
+                                {
+                                    "Relationship": relation,
+                                    "Full Name": name,
+                                    "Contact": contact,
+                                    "Vital Status": vital_status,
+                                }
+                                for relation, name, contact, vital_status in entries
+                            ]
                             st.success("✅ Your family tree records have been securely saved to the registry.")
                             rerun = getattr(st, "experimental_rerun", None)
                             if callable(rerun):
@@ -590,20 +605,87 @@ def family_view() -> None:
             </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("### 📋 Your Registered Family Members")
-        _render_styled_family_table(records)
+        # Use Streamlit header API to avoid raw markdown rendering issues
+        st.subheader("Your Registered Family Members")
+        _render_printable_family_sheet(records, title="Registered Family Registry Sheet")
 
-        # =====================================================================
-        # VIEW C: EXECUTIVE RECONCILIATION CONTROL (CHAIRPERSON & WELFARE DESKS ONLY)
-        # =====================================================================
-        if user_role in allowed_vitals_managers:
+        if user_role in ["Chairperson", "Welfare"]:
             st.markdown("<br><hr>", unsafe_allow_html=True)
             st.markdown("""
-                <div style="margin-top: 2rem; padding-top: 2rem; border-top: 2px solid #E2E8F0;">
+                <div style="margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px solid #e5e7eb;">
                     <div class="registry-panel-card">
-                        <h3>🛡️ Executive Management Panel</h3>
+                        <h3>Executive Management Panel</h3>
             """, unsafe_allow_html=True)
-            
+
+            st.caption(f"🔐 {user_role} Clearance — Review relative profiles and unlock the family registry for member edits")
+
+            unlock_label = st.text_input(
+                "Type UNLOCK below to confirm that this family registry may be unlocked for editing:",
+                key="unlock_registry_confirmation",
+            )
+
+            unlock_ready = unlock_label.strip().upper() == "UNLOCK"
+            if unlock_ready:
+                st.success("Unlock confirmation accepted. The registry will now be editable by the member.")
+
+            if st.button("🔓 Unlock Family Registry for Editing", width='stretch', key="unlock_registry"):
+                if not unlock_ready:
+                    st.error("Type UNLOCK exactly in the confirmation field before unlocking.")
+                else:
+                    st.session_state["family_registry_edit_mode"] = True
+                    st.success("✅ Family registry unlocked for member edits. The member can now revise the existing entries and resubmit.")
+                    rerun = getattr(st, "experimental_rerun", None)
+                    if callable(rerun):
+                        rerun()
+
+            st.markdown("</div></div>", unsafe_allow_html=True)
+
+        if st.session_state.get("family_registry_edit_mode", False):
+            st.markdown("<br><div class='registry-panel-card'><h3>Unlocked Edit Mode</h3><p>The member may now edit the existing family registry entries below. Submitting the form will lock the registry again.</p></div>", unsafe_allow_html=True)
+
+            with st.form("family_edit_form"):
+                update_rows = []
+                for idx, record in enumerate(records):
+                    st.markdown(f"<div class='registry-panel-card'><h4>{record['Relationship']}</h4>", unsafe_allow_html=True)
+                    full_name = st.text_input(
+                        f"Full Name for {record['Relationship']}",
+                        value=record["Full Name"],
+                        key=f"edit_full_name_{record['id']}",
+                    )
+                    contact = st.text_input(
+                        f"Contact for {record['Relationship']}",
+                        value=record["Contact"],
+                        key=f"edit_contact_{record['id']}",
+                    )
+                    vital_status = st.selectbox(
+                        f"Vital Status for {record['Relationship']}",
+                        ["Alive", "Deceased"],
+                        index=0 if record["Vital Status"] == "Alive" else 1,
+                        key=f"edit_vital_status_{record['id']}",
+                    )
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    update_rows.append(((full_name or "").strip(), (contact or "").strip() or "N/A", vital_status, record["id"]))
+
+                save_updates = st.form_submit_button("💾 Save Updated Family Registry and Re-lock", width='stretch')
+                if save_updates:
+                    try:
+                        update_family_records(update_rows)
+                        st.session_state["family_registry_edit_mode"] = False
+                        st.success("✅ Family registry updated and re-locked successfully.")
+                        rerun = getattr(st, "experimental_rerun", None)
+                        if callable(rerun):
+                            rerun()
+                    except Exception as exc:
+                        st.error(f"❌ Unable to save updated family registry: {exc}")
+
+        elif user_role in allowed_vitals_managers:
+            st.markdown("<br><hr>", unsafe_allow_html=True)
+            st.markdown("""
+                <div style="margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px solid #e5e7eb;">
+                    <div class="registry-panel-card">
+                        <h3>Executive Management Panel</h3>
+            """, unsafe_allow_html=True)
+
             st.caption(f"🔐 {user_role} Clearance — Review relative profiles and update vital status flags")
 
             target_relative = st.selectbox("Select Target Relative to Update", [r["Full Name"] for r in records], key="target_relative")
@@ -611,13 +693,12 @@ def family_view() -> None:
 
             col1, col2 = st.columns([1, 1])
             with col1:
-                if st.button("💾 Apply Status Registry Update", use_container_width=True, key="apply_update"):
+                if st.button("💾 Apply Status Registry Update", width='stretch', key="apply_update"):
                     clean_status = "Alive" if "Alive" in new_vital_status else "Deceased"
                     try:
                         update_sql = "UPDATE family_registry SET vital_status = %s WHERE member_id = %s AND full_legal_name = %s;"
-                        execute_query(update_sql, params=(clean_status, member_pk, target_relative), fetch=False)
-                        st.success(f"✅ '{target_relative}' status updated to **{clean_status}** by {user_role}.")
+                        execute_query(update_sql, params=(clean_status, member_identifier, target_relative), fetch=False)
+                        st.success("✅ Vital status updated successfully.")
                     except Exception as exc:
-                        st.error(f"❌ Update failed: {exc}")
-            
+                        st.error(f"❌ Unable to update vital status: {exc}")
             st.markdown("</div></div>", unsafe_allow_html=True)

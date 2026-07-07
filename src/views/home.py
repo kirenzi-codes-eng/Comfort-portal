@@ -2,6 +2,8 @@ import logging
 import psycopg2
 import pandas as pd
 import streamlit as st
+import time
+from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 from typing import Optional
@@ -96,6 +98,72 @@ def today_in_uganda() -> date:
     return datetime.now(timezone.utc).astimezone(uganda_offset).date()
 
 
+def parse_db_datetime(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                return datetime.strptime(cleaned, "%Y-%m-%d")
+            except ValueError:
+                try:
+                    return datetime.combine(date.fromisoformat(cleaned), datetime.min.time())
+                except ValueError:
+                    return None
+    return None
+
+
+def add_months(value: date | datetime, months: int) -> date:
+    base_date = value.date() if isinstance(value, datetime) else value
+    year = base_date.year + (base_date.month - 1 + months) // 12
+    month = (base_date.month - 1 + months) % 12 + 1
+    day = min(base_date.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def get_next_loan_due_date(user_id: Optional[str]) -> Optional[date]:
+    if not user_id:
+        return None
+
+    rows = safe_execute_query(
+        "SELECT approved_date, applied_date FROM loans WHERE member_id = %s AND status IN ('Active','Approved') ORDER BY COALESCE(approved_date, applied_date) DESC LIMIT 1;",
+        params=(user_id,),
+        fetch=True,
+        fallback=[],
+    ) or []
+    if not rows:
+        return None
+
+    base_value = rows[0].get("approved_date") or rows[0].get("applied_date")
+    base_datetime = parse_db_datetime(base_value)
+    if base_datetime is None:
+        return None
+
+    return add_months(base_datetime, 1)
+
+
+def calculate_effective_loan_balance(rows: list[dict]) -> float:
+    total = 0.0
+    for row in rows:
+        outstanding = float(row.get("outstanding_balance") or 0.0)
+        interest = float(row.get("interest_accumulated") or 0.0)
+        principal = float(row.get("amount_requested") or 0.0)
+        if principal > 0 and outstanding <= principal:
+            total += outstanding + interest
+        else:
+            total += outstanding
+    return total
+
+
 def get_financial_metrics(user_id: str) -> dict:
     """Fetch financial metrics with 60-second cache TTL."""
     if not user_id:
@@ -109,10 +177,18 @@ def get_financial_metrics_cached(user_id: str) -> dict:
     try:
         total_paid = get_effective_member_balance(user_id)
 
-        # Active Loan Balance
-        loan_sql = "SELECT COALESCE(SUM(outstanding_balance),0) as loan_balance FROM loans WHERE member_id = %s AND status IN ('Active','Approved');"
-        loan_rows = safe_execute_query(loan_sql, params=(user_id,), fetch=True, fallback=[{"loan_balance": MOCK_FINANCIAL_METRICS["loan_balance"]}])
-        loan_balance = loan_rows[0]["loan_balance"] if loan_rows else MOCK_FINANCIAL_METRICS["loan_balance"]
+        # Active Loan Balance including accumulated interest
+        loan_sql = (
+            "SELECT outstanding_balance, interest_accumulated, amount_requested "
+            "FROM loans WHERE member_id = %s AND status IN ('Active','Approved');"
+        )
+        loan_rows = safe_execute_query(
+            loan_sql,
+            params=(user_id,),
+            fetch=True,
+            fallback=[{"outstanding_balance": MOCK_FINANCIAL_METRICS["loan_balance"], "interest_accumulated": 0.0, "amount_requested": MOCK_FINANCIAL_METRICS["loan_balance"]}],
+        )
+        loan_balance = calculate_effective_loan_balance(loan_rows or [])
 
         # Pending Subscription Arrears - compute year-to-date due amount
         today = today_in_uganda()
@@ -149,7 +225,7 @@ def calculate_member_status(join_date, saving_balance, arrears_balance):
     label_map = {
         "Pending": ("Probationary", "#D97706"),
         "Active": ("Partial", "#2563EB"),
-        "Full": ("Full", "#059669"),
+        "Full Member": ("Full", "#059669"),
         "Inactive": ("Partial", "#2563EB"),
     }
     membership_label, membership_color = label_map.get(db_status, ("Probationary", "#D97706"))
@@ -232,6 +308,7 @@ def _render_identity_bar(user_name: str, user_role: str, saving_balance: float =
     role = user_role or "Member"
     membership_label, membership_color, activity_label, activity_color = calculate_member_status(join_date, saving_balance, arrears_balance)
     formatted_balance = f"{float(saving_balance or 0):,.0f}"
+    formatted_arrears = f"{float(arrears_balance or 0):,.0f}"
     activity_class = "status-active" if activity_label == "Active" else "status-inactive"
     avatar_html = (
         f"<img src=\"{escape(avatar_url)}\" width=52 height=52 style=\"border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.85);\" />"
@@ -276,10 +353,12 @@ def _render_identity_bar(user_name: str, user_role: str, saving_balance: float =
                 </div>
               </div>
             </div>
-            <div style="display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.2); padding: 8px 10px; border-radius: 999px; min-width: 0; white-space: nowrap;">
-              <span style="font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.16em; opacity: 0.8;">Savings</span>
-              <span style="font-size: 0.95rem; font-weight: 700;">UGX {formatted_balance}</span>
-            </div>
+                        <div style="display:flex; align-items:center; gap:8px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.14); padding: 6px 10px; border-radius: 999px; min-width:0; flex:0 0 auto; white-space:nowrap;">
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span style="font-size:0.72rem; text-transform:uppercase; font-weight:700; opacity:0.95; letter-spacing:0.08em;">Savings</span>
+                                <span style="font-size:0.95rem; font-weight:900;">UGX {formatted_balance}</span>
+                            </div>
+                        </div>
           </div>
         </div>
         """,
@@ -292,11 +371,18 @@ def render_admin_announcement_manager() -> None:
     if user_role not in ["Chairperson", "Secretary"]:
         return
 
-    existing_rows = execute_query(
-        "SELECT id, title, content, posted_by, created_at FROM announcements ORDER BY created_at DESC LIMIT 20;",
-        params=None,
-        fetch=True,
-    ) or []
+    try:
+        existing_rows = execute_query(
+            "SELECT id, title, content, posted_by, created_at FROM announcements ORDER BY created_at DESC LIMIT 20;",
+            params=None,
+            fetch=True,
+        ) or []
+    except psycopg2.Error as exc:
+        # Surface DB errors in the admin UI to aid debugging (missing table, connection issues, etc.)
+        err_msg = str(exc)
+        pgcode = getattr(exc, "pgcode", None)
+        st.error(f"Database error while loading announcements: {err_msg} (pgcode={pgcode})")
+        return
 
     with st.expander("Admin: Manage Announcements", expanded=False):
         action = st.radio("Choose action", ["Post new announcement", "Update existing announcement"], horizontal=True)
@@ -484,13 +570,19 @@ def home_view():
     user_name = st.session_state.get("user_name", "Guest")
     join_date = st.session_state.get("join_date")
 
-    if user_id:
-        refreshed_join_date = get_member_join_date(user_id)
-        if refreshed_join_date is not None:
-            st.session_state["join_date"] = refreshed_join_date
-            join_date = refreshed_join_date
+    metrics = {"total_paid": 0, "loan_balance": 0, "arrears": 0}
+    announcements = []
 
-    metrics = get_financial_metrics(user_id) if user_id else {"total_paid": 0, "arrears": 0}
+    if user_id:
+        with st.spinner("Loading data..."):
+            refreshed_join_date = get_member_join_date(user_id)
+            if refreshed_join_date is not None:
+                st.session_state["join_date"] = refreshed_join_date
+                join_date = refreshed_join_date
+
+            metrics = get_financial_metrics(user_id)
+            announcements = get_announcements()
+    
     saving_balance = metrics.get("total_paid", 0)
     arrears_balance = metrics.get("arrears", 0)
 
@@ -553,7 +645,8 @@ def home_view():
         subscriptions_contributed = float(metrics.get("total_paid", 0) or 0)
         arrears_balance = float(metrics.get("arrears", 0) or 0)
         loan_balance = float(metrics.get("loan_balance", 0) or 0)
-        next_installment = loan_balance / 3 if loan_balance > 0 else 0.0
+        next_due_date = get_next_loan_due_date(user_id) if user_id else None
+        next_due_display = next_due_date.strftime("%d %b %Y") if next_due_date else "No active loan"
         projected_share = subscriptions_contributed * 0.08 if subscriptions_contributed > 0 else 0.0
         alert_class = "action-card--alert" if arrears_balance > 0 else ""
 
@@ -683,7 +776,7 @@ def home_view():
                 <div class="action-title">Loans &amp; Credit</div>
                 <div class="action-stats">
                   <div class="action-stat"><span class="action-stat-label">Outstanding Balance</span><span class="action-stat-value">{format_currency(loan_balance)}</span></div>
-                  <div class="action-stat"><span class="action-stat-label">Next Installment</span><span class="action-stat-value">{format_currency(next_installment)}</span></div>
+                  <div class="action-stat"><span class="action-stat-label">Next Due Date</span><span class="action-stat-value">{next_due_display}</span></div>
                 </div>
               </div>
               <div class="action-card action-card--sharing">
@@ -727,16 +820,22 @@ def home_view():
                 fallback=[{"total_cash_loaned": MOCK_ADMIN_METRICS["total_cash_loaned"]}],
             ) or [{"total_cash_loaned": MOCK_ADMIN_METRICS["total_cash_loaned"]}]
             admin_repaid_rows = safe_execute_query(
-                "SELECT COALESCE(SUM(s.amount_paid),0) AS total_repaid "
-                "FROM subscriptions s "
-                "JOIN loans l ON s.member_id = l.member_id "
-                "WHERE s.status = 'Paid' AND l.status IN ('Active','Approved');",
+                "SELECT COALESCE(SUM(outstanding_balance),0) AS total_repaid "
+                "FROM loans "
+                "WHERE status IN ('Active','Approved') AND COALESCE(outstanding_balance,0) > 0;",
                 params=None,
                 fetch=True,
                 fallback=[{"total_repaid": MOCK_ADMIN_METRICS["total_repaid"]}],
             ) or [{"total_repaid": MOCK_ADMIN_METRICS["total_repaid"]}]
             admin_arrears_rows = safe_execute_query(
-                "SELECT COALESCE(SUM(amount_paid),0) AS total_arrears FROM subscriptions WHERE status = 'Pending';",
+                "SELECT COALESCE(SUM(GREATEST(0, (EXTRACT(MONTH FROM CURRENT_DATE) * 20000) - COALESCE(paid_year.total_paid_year, 0))), 0) AS total_arrears "
+                "FROM members m "
+                "LEFT JOIN ("
+                "  SELECT member_id, SUM(COALESCE(amount_paid, 0)) AS total_paid_year "
+                "  FROM subscriptions "
+                "  WHERE EXTRACT(YEAR FROM billing_month) = EXTRACT(YEAR FROM CURRENT_DATE) "
+                "  GROUP BY member_id"
+                ") paid_year ON paid_year.member_id = m.member_id;",
                 params=None,
                 fetch=True,
                 fallback=[{"total_arrears": MOCK_ADMIN_METRICS["total_arrears"]}],
@@ -761,7 +860,7 @@ def home_view():
                 <div style="display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;">
                   <div class="kpi-card"><div class="kpi-label">Total Savings Pool</div><div class="kpi-value">{format_currency(total_pool_savings)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Cash Loaned</div><div class="kpi-value">{format_currency(total_cash_loaned)}</div></div>
-                  <div class="kpi-card"><div class="kpi-label">Total Amount Repaid</div><div class="kpi-value">{format_currency(total_repaid)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Unrepaid Loan Amount</div><div class="kpi-value">{format_currency(total_repaid)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Outstanding Arrears</div><div class="kpi-value">{format_currency(total_arrears)}</div></div>
                 </div>
                 """,
@@ -776,7 +875,12 @@ def home_view():
                 })
 
             if borrower_table:
-                st.dataframe(pd.DataFrame(borrower_table), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(borrower_table),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={column: {"width": "small"} for column in pd.DataFrame(borrower_table).columns},
+                )
             else:
                 st.info("No active borrowers found.")
         else:

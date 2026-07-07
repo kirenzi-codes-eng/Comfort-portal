@@ -189,12 +189,22 @@ def _render_message_bubble(message: Dict[str, Any], is_self: bool, user_id: Any)
     sender_role = message.get("sender_role") or "Member"
     text = message.get("message_text") or ""
     ts = _format_timestamp(message.get("timestamp"))
+    # preserve an ISO timestamp on the element for JS polling
+    raw_ts = ""
+    try:
+        raw_val = message.get("timestamp")
+        if hasattr(raw_val, "isoformat"):
+            raw_ts = raw_val.isoformat()
+        else:
+            raw_ts = str(raw_val or "")
+    except Exception:
+        raw_ts = ""
     display_name = "You" if is_self else sender_name
     role_label = f" · {escape(sender_role)}" if sender_role else ""
 
     st.markdown(
         f"""
-        <div class="msg-row {'self' if is_self else 'other'}">
+        <div class="msg-row {'self' if is_self else 'other'}" data-ts="{escape(raw_ts)}">
           <div class="msg-bubble {'self' if is_self else 'other'}">
             <div class="msg-sender">{escape(display_name)}{role_label}</div>
             <div class="msg-text">{escape(text)}</div>
@@ -245,6 +255,79 @@ def chat_view():
         _render_message_bubble(m, m.get("member_id") == user_id, user_id)
     st.markdown("</div></div>", unsafe_allow_html=True)
 
+    # Inject a lightweight client-side poller to detect new messages and notify the user.
+    # It fetches the current page HTML every few seconds, extracts the latest message timestamp
+    # and, if newer than the last seen, shows a browser Notification and replaces the chat body.
+    st.markdown(
+        """
+        <script>
+        (function(){
+            try {
+                const POLL_MS = 6000;
+                const storageKey = 'cp_last_chat_ts';
+
+                function parseLatestTsFromDoc(doc) {
+                    const row = doc.querySelector('.chat-body .msg-row[data-ts]');
+                    if(!row) return '';
+                    // last message is the last .msg-row inside chat-body
+                    const rows = doc.querySelectorAll('.chat-body .msg-row[data-ts]');
+                    if(!rows || rows.length === 0) return '';
+                    const last = rows[rows.length - 1];
+                    return last.getAttribute('data-ts') || '';
+                }
+
+                async function pollOnce(){
+                    try {
+                        const res = await fetch(window.location.href, {cache: 'no-store'});
+                        const txt = await res.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(txt, 'text/html');
+                        const newTs = parseLatestTsFromDoc(doc);
+                        const oldTs = localStorage.getItem(storageKey) || '';
+                        if(newTs && oldTs && newTs !== oldTs) {
+                            // New message detected
+                            const permission = Notification.permission;
+                            if(permission === 'granted'){
+                                const n = new Notification('Comfort Portal', { body: 'New group chat message' });
+                                setTimeout(()=>n.close(), 5000);
+                            } else if(permission !== 'denied'){
+                                Notification.requestPermission().then(p => { if(p === 'granted'){ new Notification('Comfort Portal', { body: 'New group chat message' }); } });
+                            }
+                            // Replace the chat-body HTML
+                            const newChat = doc.querySelector('.chat-body');
+                            if(newChat){
+                                const el = document.querySelector('.chat-body');
+                                if(el) el.outerHTML = newChat.outerHTML;
+                            }
+                        }
+                        if(newTs) localStorage.setItem(storageKey, newTs);
+                    } catch(e) {
+                        console.debug('chat poll error', e);
+                    }
+                }
+
+                // initialize stored timestamp from current DOM
+                try{
+                    const rows = document.querySelectorAll('.chat-body .msg-row[data-ts]');
+                    if(rows && rows.length) {
+                        const last = rows[rows.length -1];
+                        if(last) localStorage.setItem(storageKey, last.getAttribute('data-ts') || '');
+                    }
+                } catch(_){ }
+
+                if (!('Notification' in window)) {
+                    console.debug('Chat notifications not supported in this browser, poller disabled.');
+                    return;
+                }
+
+                setInterval(pollOnce, POLL_MS);
+            } catch(err){ console.debug('chat-poller-init', err); }
+        })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.container():
         st.markdown("<div class='chat-input-shell'>", unsafe_allow_html=True)
         with st.form("group_chat_form", clear_on_submit=True):
@@ -252,7 +335,7 @@ def chat_view():
             with col1:
                 msg = st.text_input("", placeholder="Type a message...", label_visibility="collapsed")
             with col2:
-                submitted = st.form_submit_button("Send", use_container_width=True)
+                submitted = st.form_submit_button("Send", width='stretch')
         st.markdown("</div>", unsafe_allow_html=True)
 
     if submitted:

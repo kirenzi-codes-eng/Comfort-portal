@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
+from html import escape
 from typing import List, Tuple
 
 from src.database.connection import execute_query
@@ -258,6 +259,56 @@ def check_and_update_member_status(member_id: str) -> None:
         st.error("Failed to update member status.")
 
 
+def normalize_status_value(value: object) -> str:
+    if value is None:
+        return "Pending"
+
+    clean_value = str(value).strip().lower().replace("_", " ").replace("-", " ")
+    mapping = {
+        "paid": "Paid",
+        "p": "Paid",
+        "fully paid": "Paid",
+        "full paid": "Paid",
+        "complete": "Paid",
+        "completed": "Paid",
+        "approved": "Paid",
+        "pending": "Pending",
+        "due": "Pending",
+        "open": "Pending",
+        "incomplete": "Pending",
+        "arrears": "Arrears",
+        "ar": "Arrears",
+        "a": "Arrears",
+        "overdue": "Arrears",
+        "missed": "Arrears",
+        "late": "Arrears",
+    }
+    return mapping.get(clean_value, str(value).strip())
+
+
+def render_status_badge(status_value: object, arrears_amount: float = 0.0) -> str:
+    label = normalize_status_value(status_value)
+    if label in {"Paid", "Fully Paid"}:
+        return "<span class='badge badge-success'>Fully Paid</span>"
+    if label in {"Arrears", "Overdue", "Missed", "Late"} or arrears_amount > 0:
+        if arrears_amount > 0:
+            return f"<span class='badge badge-danger'>Arrears UGX {int(round(arrears_amount)):,}</span>"
+        return "<span class='badge badge-danger'>Arrears</span>"
+    return "<span class='badge badge-warning'>Pending</span>"
+
+
+def highlight_arrears_cells(row: pd.Series) -> list[tuple[int, str]]:
+    status_text = str(row.get("Status", ""))
+    if "Arrears" in status_text or "overdue" in status_text.lower():
+        return [
+            (0, "background-color: #fee2e2; color: #7f1d1d; font-weight: 700;"),
+            (1, "background-color: #fee2e2; color: #7f1d1d; font-weight: 700;"),
+            (2, "background-color: #fee2e2; color: #7f1d1d; font-weight: 700;"),
+            (3, "background-color: #fee2e2; color: #7f1d1d; font-weight: 700;"),
+        ]
+    return []
+
+
 def member_view(member_id: str) -> None:
     render_subscriptions_styles()
     st.markdown("<div class='section-path'>Subscriptions • Member Ledger</div>", unsafe_allow_html=True)
@@ -274,6 +325,7 @@ def member_view(member_id: str) -> None:
     effective_balance = get_effective_member_balance(member_id)
 
     payments_by_month = {}
+    status_by_month = {}
     if rows:
         for r in rows:
             bm = r.get("billing_month")
@@ -286,6 +338,7 @@ def member_view(member_id: str) -> None:
                 except Exception:
                     continue
             payments_by_month[key] = payments_by_month.get(key, 0.0) + float(r.get("amount_paid") or 0.0)
+            status_by_month[key] = r.get("status")
 
     ledger = []
     total_contributed = 0.0
@@ -298,9 +351,9 @@ def member_view(member_id: str) -> None:
         total_contributed += contributed
         total_arrears += arrears
         if arrears <= 0:
-            status = "<span class='status-pill success'>🟢 Fully Paid</span>"
+            status = render_status_badge("Paid", 0.0)
         else:
-            status = f"<span class='status-pill due'>🔴 Arrears: UGX {int(round(arrears)):,}</span>"
+            status = render_status_badge(status_by_month.get(month_num, "Arrears"), arrears)
         ledger.append(
             {
                 "Month": month_label,
@@ -312,29 +365,65 @@ def member_view(member_id: str) -> None:
 
     st.markdown(
         f"""
-        <div class='summary-card'>
-          <div class='metric-row'>
-            <div class='metric-block'>
-              <div class='metric-label'>Net Savings Balance</div>
-              <div class='metric-value'>UGX {int(round(effective_balance)):,}</div>
-              <div class='metric-note'>Contributions minus approved withdrawals for this member.</div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
+            <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+                <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6C757D; font-weight:600;">My Subscriptions</div>
+                <div style="font-size:1.35rem; font-weight:700; color:#0066FF; margin-top:4px;">UGX {int(round(effective_balance)):,}</div>
             </div>
-            <div class='metric-block'>
-              <div class='metric-label'>Outstanding Arrears</div>
-              <div class='metric-value'>UGX {int(round(total_arrears)):,}</div>
-              <div class='metric-note'>Current remaining dues for the active year.</div>
+            <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+                <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6C757D; font-weight:600;">Arrears</div>
+                <div style="font-size:1.35rem; font-weight:700; color:#FF3B30; margin-top:4px;">UGX {int(round(total_arrears)):,}</div>
             </div>
-          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    if rows:
+        history_rows = []
+        for r in rows:
+            bm = r.get("billing_month")
+            if isinstance(bm, (datetime, date)):
+                billing_month_label = bm.strftime("%b %Y")
+            else:
+                billing_month_label = str(bm or "Unknown")
+
+            history_rows.append(
+                {
+                    "Billing Month": billing_month_label,
+                    "Amount Paid": f"UGX {int(round(float(r.get('amount_paid') or 0))):,}",
+                    "Status": normalize_status_value(r.get("status")),
+                }
+            )
+
+        st.subheader("Payment History")
+        st.dataframe(pd.DataFrame(history_rows), width="stretch")
+
     st.markdown("---")
     st.subheader("Monthly Ledger")
     df = pd.DataFrame(ledger)
+    df["Status"] = [
+        value if isinstance(value, str) and value.strip().startswith("<span") else render_status_badge(value)
+        for value in df["Status"]
+    ]
+
+    styled_html = df.to_html(index=False, escape=False, classes='compact-table', border=0)
+    if not df.empty:
+        rows_html = []
+        for _, row in df.iterrows():
+            cells = []
+            highlight_cells = highlight_arrears_cells(row)
+            for idx, value in enumerate(row.tolist()):
+                style = next((style for cell_idx, style in highlight_cells if cell_idx == idx), "")
+                if style:
+                    cells.append(f"<td style='{style}'>{value}</td>")
+                else:
+                    cells.append(f"<td>{value}</td>")
+            rows_html.append(f"<tr>{''.join(cells)}</tr>")
+        styled_html = f"<table class='dataframe compact-table'>{''.join(rows_html)}</table>"
+
     st.markdown(
-        df.to_html(index=False, escape=False),
+        f"<div class='card' style='padding: 0.5rem; overflow-x: auto;'>{styled_html}</div>",
         unsafe_allow_html=True,
     )
 
@@ -352,13 +441,20 @@ def fetch_all_members_cached() -> List[Tuple[str, str]]:
     return [(r["member_id"], r["full_name"]) for r in rows]
 
 
-def treasurer_view():
+def treasurer_view(user_role: str):
     render_subscriptions_styles()
+    title = "Treasurer Portal" if user_role == "Treasurer" else "Executive Subscription Review"
+    subtitle = (
+        "Record member subscription payments and apply loan repayments with clarity and accuracy."
+        if user_role == "Treasurer"
+        else "Review posted member subscription payments and contribution history without editing entries."
+    )
+
     st.markdown(
-        """
+        f"""
         <div class='hero-block'>
-          <div class='hero-title'>Treasurer Portal</div>
-          <div class='hero-copy'>Record member subscription payments and apply loan repayments with clarity and accuracy.</div>
+          <div class='hero-title'>{title}</div>
+          <div class='hero-copy'>{subtitle}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -366,75 +462,155 @@ def treasurer_view():
     st.markdown(
         """
         <div class='info-card pink'>
-          Use this workspace to log subscription receipts, monitor member activity, and keep loan balances aligned.
+          Use this workspace to review subscription receipts, member activity, and posted payments.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    members = fetch_all_members()
+    with st.spinner("Loading data..."):
+        members = fetch_all_members()
+        recent = fetch_recent_subscriptions(30)
+
     if not members:
         st.info("No members found.")
         return
 
     member_options = {f"{m[1]} ({m[0]})": m[0] for m in members}
 
-    col1, col2 = st.columns(2, gap="large")
-    with col1:
-        with st.container():
-            st.markdown("<div class='form-panel green'>", unsafe_allow_html=True)
-            st.markdown("<div class='form-panel-title'>Post Subscription Payment</div>", unsafe_allow_html=True)
-            with st.form("post_payment_form"):
-                selected = st.selectbox("Member", options=list(member_options.keys()))
-                billing_month = st.date_input("Billing Month", value=today_in_uganda())
-                amount = st.number_input("Amount Paid (UGX)", min_value=0.0, value=20000.0, step=100.0)
-                submit_payment = st.form_submit_button("Post Payment")
+    if user_role == "Treasurer":
+        col1, col2 = st.columns(2, gap="large")
+        with col1:
+            with st.container():
+                st.markdown("<div class='form-panel green'>", unsafe_allow_html=True)
+                st.markdown("<div class='form-panel-title'>Post Subscription Payment</div>", unsafe_allow_html=True)
+                with st.form("post_payment_form"):
+                    selected = st.selectbox("Member", options=list(member_options.keys()))
+                    billing_month = st.date_input("Billing Month", value=today_in_uganda())
+                    amount = st.number_input("Amount Paid (UGX)", min_value=0.0, value=20000.0, step=100.0)
+                    submit_payment = st.form_submit_button("Post Payment")
 
-            if submit_payment:
-                member_id = member_options[selected]
-                bm = billing_month.replace(day=1)
-                try:
-                    execute_query(
-                        "INSERT INTO subscriptions (member_id, billing_month, amount_paid, status) VALUES (%s, %s, %s, %s);",
-                        params=(member_id, bm, amount, "Paid"),
-                        fetch=False,
-                    )
-                    st.toast("Payment recorded.", icon="✅")
-                    check_and_update_member_status(member_id)
-                except Exception as e:
-                    st.error(f"Failed to record payment: {e}")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    with col2:
-        with st.container():
-            st.markdown("<div class='form-panel brown'>", unsafe_allow_html=True)
-            st.markdown("<div class='form-panel-title'>Loan Repayment</div>", unsafe_allow_html=True)
-            with st.form("loan_repayment_form"):
-                loan_member = st.selectbox("Member for Loan Repayment", options=list(member_options.keys()), key="loan_member")
-                repay_amount = st.number_input("Repayment Amount (UGX)", min_value=0.0, value=0.0, step=100.0)
-                submit_repay = st.form_submit_button("Apply Repayment")
-
-            if submit_repay:
-                member_id = member_options[loan_member]
-                if repay_amount <= 0:
-                    st.toast("Enter a positive repayment amount.", icon="⚠️")
-                else:
+                if submit_payment:
+                    member_id = member_options[selected]
+                    bm = billing_month.replace(day=1)
                     try:
-                        rows = execute_query(
-                            "UPDATE loans SET outstanding_balance = GREATEST(outstanding_balance - %s, 0) "
-                            "WHERE member_id = %s AND status = 'Approved' RETURNING loan_id, outstanding_balance;",
-                            params=(repay_amount, member_id),
-                            fetch=True,
+                        execute_query(
+                            "INSERT INTO subscriptions (member_id, billing_month, amount_paid, status) VALUES (%s, %s, %s, %s);",
+                            params=(member_id, bm, amount, "Paid"),
+                            fetch=False,
                         )
-                        if rows:
-                            st.toast("Repayment applied to active loan.", icon="✅")
-                        else:
-                            st.info("No active approved loan found for this member.")
+                        st.toast("Payment recorded.", icon="✅")
+                        check_and_update_member_status(member_id)
                     except Exception as e:
-                        st.error(f"Failed to apply repayment: {e}")
-            st.markdown("</div>", unsafe_allow_html=True)
+                        st.error(f"Failed to record payment: {e}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        with col2:
+            with st.container():
+                st.markdown("<div class='form-panel brown'>", unsafe_allow_html=True)
+                st.markdown("<div class='form-panel-title'>Loan Repayment</div>", unsafe_allow_html=True)
+                with st.form("loan_repayment_form"):
+                    loan_member = st.selectbox("Member for Loan Repayment", options=list(member_options.keys()), key="loan_member")
+                    repay_amount = st.number_input("Repayment Amount (UGX)", min_value=0.0, value=0.0, step=100.0)
+                    submit_repay = st.form_submit_button("Apply Repayment")
+
+                if submit_repay:
+                    member_id = member_options[loan_member]
+                    if repay_amount <= 0:
+                        st.toast("Enter a positive repayment amount.", icon="⚠️")
+                    else:
+                        try:
+                            rows = execute_query(
+                                "UPDATE loans SET outstanding_balance = GREATEST(outstanding_balance - %s, 0) "
+                                "WHERE member_id = %s AND status = 'Approved' RETURNING loan_id, outstanding_balance;",
+                                params=(repay_amount, member_id),
+                                fetch=True,
+                            )
+                            if rows:
+                                st.toast("Repayment applied to active loan.", icon="✅")
+                            else:
+                                st.info("No active approved loan found for this member.")
+                        except Exception as e:
+                            st.error(f"Failed to apply repayment: {e}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("---")
+    else:
+        st.markdown(
+            """
+            <div class='info-card'>
+              Chairperson can review all posted subscription payments and member-ledger details here.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("---")
+
+    st.markdown("### Recently Posted Subscription Payments")
+    if recent:
+        recent_df = pd.DataFrame(
+            [
+                {
+                    "Member": row.get("full_name") or row.get("member_id"),
+                    "Member ID": row.get("member_id"),
+                    "Billing Month": (
+                        (row.get("billing_month") or datetime.now()).strftime("%b %Y")
+                        if isinstance(row.get("billing_month"), (datetime, date))
+                        else str(row.get("billing_month") or "Unknown")
+                    ),
+                    "Amount Paid": f"UGX {int(round(row.get('amount_paid') or 0)):,}",
+                    "Status": normalize_status_value(row.get("status")),
+                }
+                for row in recent
+            ]
+        )
+        st.dataframe(recent_df, width="stretch")
+    else:
+        st.info("No posted subscription payments in the last 30 days.")
 
     st.markdown("---")
+    selected = st.selectbox("Select member to inspect", options=list(member_options.keys()))
+    selected_member_id = member_options[selected]
+
+    st.markdown(f"### Detailed member subscription ledger for {escape(selected)}")
+
+    # If Secretary, allow exporting the selected member's payment history as CSV
+    if user_role == "Secretary":
+        try:
+            history_rows = []
+            rows = execute_query(
+                "SELECT billing_month, amount_paid, status FROM subscriptions WHERE member_id = %s ORDER BY billing_month;",
+                params=(selected_member_id,),
+                fetch=True,
+            ) or []
+
+            for r in rows:
+                bm = r.get("billing_month")
+                if bm is not None and hasattr(bm, "strftime"):
+                    billing_month_label = bm.strftime("%Y-%m-%d")
+                else:
+                    billing_month_label = str(bm or "")
+                history_rows.append({
+                    "billing_month": billing_month_label,
+                    "amount_paid": float(r.get("amount_paid") or 0.0),
+                    "status": str(r.get("status") or ""),
+                })
+
+            if history_rows:
+                df_export = pd.DataFrame(history_rows)
+                csv_bytes = df_export.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download member ledger CSV",
+                    data=csv_bytes,
+                    file_name=f"{selected_member_id}_ledger.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.info("No subscription history available for export.")
+        except Exception as e:
+            st.error(f"Failed to prepare ledger export: {e}")
+
+    member_view(selected_member_id)
 
 
 def fetch_recent_subscriptions(days: int = 7) -> list[dict]:
@@ -495,8 +671,9 @@ def chairperson_monitor_view():
         return
 
     today = today_in_uganda()
-    summary = fetch_subscription_summary(today.year)
-    recent = fetch_recent_subscriptions(7)
+    with st.spinner("Loading data..."):
+        summary = fetch_subscription_summary(today.year)
+        recent = fetch_recent_subscriptions(7)
 
     st.markdown("<div class='page-panel'>", unsafe_allow_html=True)
     col1, col2 = st.columns(2, gap="large")
@@ -530,7 +707,7 @@ def chairperson_monitor_view():
     selected = st.selectbox("Select member to inspect", options=list(member_options.keys()))
     selected_member_id = member_options[selected]
 
-    st.markdown("### Detailed member subscription ledger")
+    st.markdown(f"### Detailed member subscription ledger for {escape(selected)}")
     member_view(selected_member_id)
 
 
@@ -556,8 +733,9 @@ def subscriptions_view():
         except Exception:
             pass
 
-    if user_role == "Treasurer":
-        treasurer_view()
+    if user_role in ("Treasurer", "Secretary"):
+        # Treasurer retains posting capabilities; Secretary may review other members' ledgers without posting.
+        treasurer_view(user_role)
         return
 
     if user_role == "Member":

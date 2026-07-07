@@ -1,10 +1,17 @@
+import io
 import os
+import time
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 from html import escape
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.pdfgen import canvas
 
 from src.database.connection import execute_query
 
@@ -61,6 +68,68 @@ def _normalize_join_date(value: Optional[object]) -> Optional[date]:
             except ValueError:
                 return None
     return None
+
+
+def _rerun_page() -> None:
+    """Safely rerun the current Streamlit page across Streamlit versions."""
+    rerun = getattr(st, "rerun", None)
+    if callable(rerun):
+        rerun()
+        return
+
+    experimental_rerun = getattr(st, "experimental_rerun", None)
+    if callable(experimental_rerun):
+        experimental_rerun()
+
+
+def _render_member_profile_summary(member_record: Optional[Dict]) -> None:
+    """Render a compact summary card for the selected member profile."""
+    if not member_record:
+        st.info("No profile details available yet.")
+        return
+
+    st.markdown("### Updated Member Profile")
+    st.markdown(
+        f"""
+        <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;margin:10px 0 12px;box-shadow:0 6px 16px rgba(15,23,42,0.04);">
+            <div style="font-weight:700;color:#0f172a;margin-bottom:8px;">{escape(str(member_record.get('full_name') or '-'))}</div>
+            <div style="font-size:0.92rem;color:#334155;line-height:1.5;">
+                <div><strong>Email:</strong> {escape(str(member_record.get('email') or '-'))}</div>
+                <div><strong>Phone:</strong> {escape(str(member_record.get('phone') or '-'))}</div>
+                <div><strong>Role:</strong> {escape(str(member_record.get('role') or '-'))}</div>
+                <div><strong>Status:</strong> {escape(str(member_record.get('status') or '-'))}</div>
+                <div><strong>Join Date:</strong> {escape(str(member_record.get('join_date') or '-'))}</div>
+                <div><strong>National ID:</strong> {escape(str(member_record.get('national_id') or '-'))}</div>
+                <div><strong>Emergency Contact:</strong> {escape(str(member_record.get('emergency_contact_name') or '-'))} • {escape(str(member_record.get('emergency_contact_phone') or '-'))}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _build_changed_profile_update_payload(original: Optional[Dict], submitted: Dict) -> Dict:
+    """Return only the fields whose submitted values differ from the original record."""
+    if not original:
+        return {key: value for key, value in submitted.items()}
+
+    payload: Dict = {}
+    for key, value in submitted.items():
+        original_value = original.get(key)
+        if isinstance(value, str):
+            normalized_value = value.strip()
+            if isinstance(original_value, str):
+                normalized_original = original_value.strip()
+            else:
+                normalized_original = ""
+            if normalized_value == "":
+                payload[key] = None
+            else:
+                payload[key] = normalized_value if normalized_value != normalized_original else None
+        else:
+            payload[key] = value if value != original_value else None
+
+    return payload
 
 
 def build_member_profile_update(
@@ -178,6 +247,11 @@ def fetch_member_directory_cached() -> List[Dict]:
 
 
 def fetch_member_record(member_id: str) -> Optional[Dict]:
+    return fetch_member_record_cached(member_id)
+
+
+@st.cache_data(ttl=300)
+def fetch_member_record_cached(member_id: str) -> Optional[Dict]:
     rows = execute_query(
         "SELECT member_id, full_name, email, phone, role, status, join_date, notes, avatar_url, date_of_birth, gender, address, city, country, nationality, occupation, employer, national_id, next_of_kin_name, next_of_kin_relationship, next_of_kin_phone, emergency_contact_name, emergency_contact_phone FROM members WHERE member_id = %s LIMIT 1;",
         params=(member_id,),
@@ -217,6 +291,53 @@ def update_member_role_status(member_id: str, new_role: str, new_status: str) ->
     )
 
 
+def build_member_profile_pdf(member_record: Optional[Dict]) -> bytes:
+    if not member_record:
+        member_record = {}
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    pdf.setTitle(f"Member Profile - {member_record.get('member_id', 'Unknown')}")
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.setFillColor(colors.HexColor("#14532D"))
+    pdf.drawString(0.75 * inch, height - 0.75 * inch, "Comfort Portal - Member Profile")
+
+    pdf.setFont("Helvetica", 11)
+    pdf.setFillColor(colors.HexColor("#1F2937"))
+    y = height - 1.25 * inch
+    fields = [
+        ("Member ID", member_record.get("member_id") or "-"),
+        ("Full Name", member_record.get("full_name") or "-"),
+        ("Email", member_record.get("email") or "-"),
+        ("Phone", member_record.get("phone") or "-"),
+        ("Role", member_record.get("role") or "-"),
+        ("Status", member_record.get("status") or "-"),
+        ("Join Date", member_record.get("join_date") or "-"),
+        ("Occupation", member_record.get("occupation") or "-"),
+        ("Employer", member_record.get("employer") or "-"),
+        ("National ID", member_record.get("national_id") or "-"),
+        ("Address", member_record.get("address") or "-"),
+        ("City", member_record.get("city") or "-"),
+        ("Next of Kin", member_record.get("next_of_kin_name") or "-"),
+        ("Emergency Contact", member_record.get("emergency_contact_phone") or "-"),
+    ]
+
+    for label, value in fields:
+        if y < 1.0 * inch:
+            pdf.showPage()
+            y = height - 0.75 * inch
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(0.75 * inch, y, f"{label}:")
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(1.8 * inch, y, str(value))
+        y -= 0.2 * inch
+
+    pdf.save()
+    return buffer.getvalue()
+
+
 def approve_new_registration(member_id: str) -> None:
     execute_query(
         "UPDATE members SET status = %s, role = %s WHERE member_id = %s;",
@@ -227,17 +348,21 @@ def approve_new_registration(member_id: str) -> None:
         fetch_member_directory_cached.clear()
     except Exception:
         pass
+    try:
+        fetch_member_record_cached.clear()
+    except Exception:
+        pass
 
 
 def update_member_profile(
     member_id: str,
-    full_name: str,
-    email: str,
-    phone: str,
-    role: str,
-    status: str,
-    join_date: Optional[object],
-    notes: Optional[str],
+    full_name: Optional[str] = None,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    role: Optional[str] = None,
+    status: Optional[str] = None,
+    join_date: Optional[object] = None,
+    notes: Optional[str] = None,
     date_of_birth: Optional[object] = None,
     gender: Optional[str] = None,
     address: Optional[str] = None,
@@ -287,10 +412,22 @@ def update_member_profile(
             fetch_member_directory_cached.clear()
         except Exception:
             pass
+        try:
+            fetch_member_record_cached.clear()
+        except Exception:
+            pass
 
 
 def admin_docs_view():
-    st.header("Member Directory & Document Repository")
+    st.markdown(
+        """
+        <div style="background: linear-gradient(135deg, #DDFBE8 0%, #8BE6A6 100%); border: 1px solid #63C97A; border-radius: 16px; padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(99, 201, 122, 0.22); margin-bottom: 10px;">
+          <h1 style="margin: 0; font-size: 1.25rem; color: #14532D;">Member Directory & Document Repository</h1>
+          <p style="margin: 4px 0 0; color: #2F5F3D; font-size: 0.8rem; line-height: 1.5;">Manage members, approvals, and shared documents from a compact admin workspace.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     user_role = st.session_state.get("user_role")
     user_name = st.session_state.get("user_name")
 
@@ -302,27 +439,33 @@ def admin_docs_view():
     ensure_member_profile_columns()
 
     # Member Directory
-    st.subheader("Member Details Directory")
-    members = fetch_member_directory()
+    st.markdown("### Member Details Directory")
+    with st.spinner("Loading data..."):
+        members = fetch_member_directory()
     if members:
         df = pd.DataFrame(members)
-        st.dataframe(df)
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            column_config={column: {"width": "small"} for column in df.columns},
+        )
     else:
         st.info("No members found.")
 
     if user_role == "Chairperson":
-        st.write("---")
-        st.subheader("Approve New Registrations")
+        st.markdown("---")
+        st.markdown("### Approve New Registrations")
         pending_members = [row for row in members if str(row.get("status") or "").lower() in {"pending", "new"}]
         if pending_members:
             for member in pending_members:
                 with st.container():
                     st.markdown(
                         f"""
-                        <div style='background: linear-gradient(135deg, #fef3c7 0%, #fff7ed 100%); border: 1px solid #fdba74; border-radius: 16px; padding: 14px 16px; margin-bottom: 10px;'>
-                          <div style='font-weight: 700; color: #9a2c00;'>{member.get('full_name') or 'Unnamed Member'} ({member.get('member_id')})</div>
-                          <div style='color: #7c2d12; margin-top: 4px;'>Email: {member.get('email') or '-'} • Phone: {member.get('phone') or '-'}</div>
-                          <div style='color: #7c2d12; margin-top: 6px;'>Current status: {member.get('status') or 'Pending'}</div>
+                        <div class="card" style="padding: 10px; margin-bottom: 8px;">
+                          <div style="font-weight: 700; color: #0f172a;">{member.get('full_name') or 'Unnamed Member'} ({member.get('member_id')})</div>
+                          <div style="color: #64748b; margin-top: 4px; font-size: 0.78rem;">Email: {member.get('email') or '-'} • Phone: {member.get('phone') or '-'}</div>
+                          <div style="color: #dc3545; margin-top: 4px; font-size: 0.78rem;">Current status: {member.get('status') or 'Pending'}</div>
                         </div>
                         """,
                         unsafe_allow_html=True,
@@ -334,8 +477,8 @@ def admin_docs_view():
         else:
             st.info("No pending registrations to approve right now.")
 
-        st.write("---")
-        st.subheader("Update Member Profile")
+        st.markdown("---")
+        st.markdown("### Update Member Profile")
         member_map = {f"{row['full_name']} ({row['member_id']})": row for row in members}
         selected_key = st.selectbox("Select member", options=list(member_map.keys()), key="chairperson_member_profile_select")
         selected_member = member_map[selected_key]
@@ -372,9 +515,19 @@ def admin_docs_view():
                 st.markdown(f"**Emergency Contact:** {escape(str(selected_member_detail.get('next_of_kin_name') or '-'))} — {escape(str(selected_member_detail.get('next_of_kin_phone') or '-'))}")
                 st.markdown(f"**Notes:** {escape(str(selected_member_detail.get('notes') or '-'))}")
 
+            if user_role in {"Chairperson", "Secretary"}:
+                pdf_bytes = build_member_profile_pdf(selected_member_detail)
+                st.download_button(
+                    label="Download Member Profile PDF",
+                    data=pdf_bytes,
+                    file_name=f"member_{selected_member_detail.get('member_id', 'profile')}.pdf",
+                    mime="application/pdf",
+                    key=f"pdf_{member_key}",
+                )
+
             if st.button("Edit Member Profile", key=f"edit_toggle_{member_key}"):
                 st.session_state[edit_flag_key] = True
-                st.experimental_rerun()
+                _rerun_page()
 
         else:
             # Existing full-edit form (chairperson)
@@ -384,9 +537,14 @@ def admin_docs_view():
                     full_name = st.text_input("Full name", value=str(selected_member_detail.get("full_name") or ""), key="chairperson_full_name")
                     email = st.text_input("Email", value=str(selected_member_detail.get("email") or ""), key="chairperson_email")
                     phone = st.text_input("Phone", value=str(selected_member_detail.get("phone") or ""), key="chairperson_phone")
+                    safe_dob = _normalize_join_date(selected_member_detail.get("date_of_birth"))
+                    if not safe_dob or safe_dob.year < 1900 or safe_dob.year > date.today().year:
+                        safe_dob = date(2000, 1, 1)
                     date_of_birth_value = st.date_input(
                         "Date of birth",
-                        value=_normalize_join_date(selected_member_detail.get("date_of_birth")) or date.today(),
+                        value=safe_dob,
+                        min_value=date(1900, 1, 1),
+                        max_value=date(date.today().year, 12, 31),
                         key="chairperson_date_of_birth",
                     )
                     gender = st.text_input("Gender", value=str(selected_member_detail.get("gender") or ""), key="chairperson_gender")
@@ -397,22 +555,29 @@ def admin_docs_view():
 
                 with col2:
                     role_options = ["Member", "Secretary", "Treasurer", "Chairperson", "Vice Chairperson", "Welfare"]
+                    selected_role = str(selected_member_detail.get("role") or "")
                     new_role = st.selectbox(
                         "Role",
                         options=role_options,
-                        index=role_options.index(selected_member_detail.get("role")) if selected_member_detail.get("role") in role_options else 0,
+                        index=role_options.index(selected_role) if selected_role in role_options else 0,
                         key="chairperson_role",
                     )
-                    status_options = ["Active", "Inactive", "Pending", "Full"]
+                    status_options = ["Active", "Inactive", "Pending", "Full Member"]
+                    selected_status = str(selected_member_detail.get("status") or "")
                     new_status = st.selectbox(
                         "Status",
                         options=status_options,
-                        index=status_options.index(selected_member_detail.get("status")) if selected_member_detail.get("status") in status_options else 0,
+                        index=status_options.index(selected_status) if selected_status in status_options else 0,
                         key="chairperson_status",
                     )
+                    safe_join_date = _normalize_join_date(selected_member_detail.get("join_date"))
+                    if not safe_join_date or safe_join_date.year < 1900 or safe_join_date.year > date.today().year:
+                        safe_join_date = date(2000, 1, 1)
                     join_date_value = st.date_input(
                         "Join date",
-                        value=_normalize_join_date(selected_member_detail.get("join_date")) or date.today(),
+                        value=safe_join_date,
+                        min_value=date(1900, 1, 1),
+                        max_value=date(date.today().year, 12, 31),
                         key="chairperson_join_date",
                     )
                     occupation = st.text_input("Occupation", value=str(selected_member_detail.get("occupation") or ""), key="chairperson_occupation")
@@ -431,58 +596,86 @@ def admin_docs_view():
                 btn_col_a, btn_col_b = st.columns([1, 1])
                 with btn_col_a:
                     save_clicked = st.form_submit_button("Save Member Profile")
-                with btn_col_b:
-                    cancel_clicked = st.button("Cancel Edit", key=f"cancel_edit_{member_key}")
+
+            cancel_clicked = st.button("Cancel Edit", key=f"cancel_edit_{member_key}")
 
             if cancel_clicked:
                 st.session_state[edit_flag_key] = False
-                st.experimental_rerun()
+                _rerun_page()
 
             if save_clicked:
+                submitted_values = {
+                    "full_name": (full_name or "").strip() or None,
+                    "email": (email or "").strip() or None,
+                    "phone": (phone or "").strip() or None,
+                    "role": new_role,
+                    "status": new_status,
+                    "join_date": join_date_value,
+                    "notes": (notes or "").strip() or None,
+                    "date_of_birth": date_of_birth_value,
+                    "gender": (gender or "").strip() or None,
+                    "address": (address or "").strip() or None,
+                    "city": (city or "").strip() or None,
+                    "country": (country or "").strip() or None,
+                    "nationality": (nationality or "").strip() or None,
+                    "occupation": (occupation or "").strip() or None,
+                    "employer": (employer or "").strip() or None,
+                    "national_id": (national_id or "").strip() or None,
+                    "next_of_kin_name": (next_of_kin_name or "").strip() or None,
+                    "next_of_kin_relationship": (next_of_kin_relationship or "").strip() or None,
+                    "next_of_kin_phone": (next_of_kin_phone or "").strip() or None,
+                    "emergency_contact_name": (emergency_contact_name or "").strip() or None,
+                    "emergency_contact_phone": (emergency_contact_phone or "").strip() or None,
+                }
+                changed_values = _build_changed_profile_update_payload(selected_member_detail, submitted_values)
+
                 update_member_profile(
                     selected_member_detail["member_id"],
-                    full_name.strip(),
-                    email.strip(),
-                    phone.strip(),
-                    new_role,
-                    new_status,
-                    join_date_value,
-                    notes.strip() or None,
-                    date_of_birth_value,
-                    gender.strip() or None,
-                    address.strip() or None,
-                    city.strip() or None,
-                    country.strip() or None,
-                    nationality.strip() or None,
-                    occupation.strip() or None,
-                    employer.strip() or None,
-                    national_id.strip() or None,
-                    next_of_kin_name.strip() or None,
-                    next_of_kin_relationship.strip() or None,
-                    next_of_kin_phone.strip() or None,
-                    emergency_contact_name.strip() or None,
-                    emergency_contact_phone.strip() or None,
+                    changed_values.get("full_name"),
+                    changed_values.get("email"),
+                    changed_values.get("phone"),
+                    changed_values.get("role"),
+                    changed_values.get("status"),
+                    changed_values.get("join_date"),
+                    changed_values.get("notes"),
+                    changed_values.get("date_of_birth"),
+                    changed_values.get("gender"),
+                    changed_values.get("address"),
+                    changed_values.get("city"),
+                    changed_values.get("country"),
+                    changed_values.get("nationality"),
+                    changed_values.get("occupation"),
+                    changed_values.get("employer"),
+                    changed_values.get("national_id"),
+                    changed_values.get("next_of_kin_name"),
+                    changed_values.get("next_of_kin_relationship"),
+                    changed_values.get("next_of_kin_phone"),
+                    changed_values.get("emergency_contact_name"),
+                    changed_values.get("emergency_contact_phone"),
                 )
-                st.toast("Member profile updated.", icon="✅")
                 st.session_state[edit_flag_key] = False
-                st.experimental_rerun()
+                st.success("Member profile updated successfully.")
+                updated_member = fetch_member_record(selected_member_detail["member_id"])
+                _render_member_profile_summary(updated_member)
+                _rerun_page()
 
-    st.write("---")
-    st.subheader("Document Repository")
+    st.markdown("---")
+    st.markdown("### Document Repository")
 
     if user_role == "Secretary":
         uploaded_file = st.file_uploader("Upload meeting minutes or documents", type=None)
         if uploaded_file is not None:
             title = st.text_input("Document Title", value=uploaded_file.name)
             if st.button("Upload Document"):
-                if not title.strip():
+                title_text = (title or "").strip()
+                if not title_text:
                     st.toast("Please provide a title for the document.", icon="⚠️")
                 else:
                     file_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uploaded_file.name}"
                     save_path = os.path.join(UPLOAD_DIR, file_name)
                     with open(save_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
-                    save_document_record(title.strip(), save_path, user_name or "Secretary")
+                    save_document_record(title_text, save_path, user_name or "Secretary")
                     st.toast("Document uploaded successfully.", icon="✅")
 
     documents = fetch_documents()
@@ -491,17 +684,25 @@ def admin_docs_view():
             title = doc.get("title") or "Untitled"
             file_url = doc.get("file_url") or ""
             uploaded_at = doc.get("uploaded_at")
-            uploaded_at_str = uploaded_at.strftime("%Y-%m-%d %H:%M") if hasattr(uploaded_at, "strftime") else str(uploaded_at)
+            uploaded_at_str = uploaded_at.strftime("%Y-%m-%d %H:%M") if uploaded_at is not None and hasattr(uploaded_at, "strftime") else str(uploaded_at or "-")
             if os.path.exists(file_url):
                 with st.container():
-                    st.markdown(f"**{title}**")
-                    st.write(f"Uploaded at: {uploaded_at_str}")
-                    st.download_button(
-                        label="Download",
-                        data=open(file_url, "rb").read(),
-                        file_name=os.path.basename(file_url),
-                        mime="application/octet-stream",
+                    st.markdown(
+                        f"""
+                        <div class="card" style="padding: 10px; margin-bottom: 8px;">
+                          <div style="font-weight: 700; color: #0f172a;">{title}</div>
+                          <div style="color: #64748b; margin-top: 4px; font-size: 0.78rem;">Uploaded at: {uploaded_at_str}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
+                    with open(file_url, "rb") as handle:
+                        st.download_button(
+                            label="Download",
+                            data=handle.read(),
+                            file_name=os.path.basename(file_url),
+                            mime="application/octet-stream",
+                        )
             else:
                 st.markdown(f"- [{title}]({file_url}) — {uploaded_at_str}")
     else:

@@ -1,0 +1,277 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+
+:root {
+  --primary: #0066ff;
+  --success: #00c853;
+  --danger: #ff3b30;
+  --warning: #ff9500;
+  --bg: #f8f9fa;
+  --card: #ffffff;
+  --text: #1a1a1a;
+  --muted: #6c757d;
+  --border: #e9ecef;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+html,
+body,
+.stApp,
+[data-testid="stAppViewContainer"] {
+  background: var(--bg) !important;
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+.stMainBlockContainer {
+  background: var(--bg);
+}
+
+.block-container {
+  padding: 1rem 1rem 2rem !important;
+  max-width: 1400px;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--primary);
+  letter-spacing: -0.02em;
+}
+
+h1 {
+  font-size: 1.45rem !important;
+  margin-bottom: 0.35rem !important;
+}
+
+h2 {
+  font-size: 1.2rem !important;
+}
+
+p,
+.stMarkdown,
+.stTextInput,
+.stSelectbox,
+.stTextArea,
+.stButton button,
+.stDataFrame,
+.stMetric,
+.stTabs {
+  font-size: 0.9rem !important;
+  color: var(--text);
+}
+
+[data-testid="stSidebar"] {
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.03);
+}
+
+[data-testid="stSidebar"] .block-container {
+  padding: 0.75rem !important;
+}
+
+[data-testid="stHorizontalBlock"] {
+  gap: 0.5rem !important;
+}
+
+[data-testid="stHorizontalBlock"] > div {
+  min-width: 0;
+}
+
+div[data-testid="stVerticalBlock"] > div {
+  gap: 0.4rem !important;
+}
+
+.card,
+.kpi-card,
+.workspace-panel,
+.hero-shell,
+.action-card,
+.page-panel,
+.form-panel,
+.summary-card,
+.info-card,
+.metric-shell {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.hero-shell,
+.summary-card {
+  background: linear-gradient(135deg, var(--card) 0%, #f9fbff 100%);
+}
+
+.stMetric {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 0.8rem 0.9rem;
+  box-shadow: var(--shadow);
+}
+
+.stMetric [data-testid="stMetricValue"] {
+  font-size: 1.45rem !important;
+  line-height: 1.2;
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.stMetric [data-testid="stMetricLabel"] {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--border) !important;
+  border-radius: 16px !important;
+  overflow: hidden !important;
+  box-shadow: var(--shadow);
+  background: var(--card);
+}
+
+[data-testid="stDataFrame"] .dataframe {
+  font-size: 0.8rem !important;
+}
+
+[data-testid="stDataFrame"] table {
+  width: 100% !important;
+  border-collapse: collapse;
+}
+
+[data-testid="stDataFrame"] thead th {
+  background: #f7f9fc !important;
+  color: var(--text) !important;
+  padding: 0.6rem 0.7rem !important;
+  font-size: 0.74rem !important;
+  font-weight: 700;
+}
+
+[data-testid="stDataFrame"] tbody td {
+  padding: 0.55rem 0.7rem !important;
+  color: var(--text);
+  font-size: 0.78rem !important;
+}
+
+.badge,
+.badge-success,
+.badge-danger,
+.badge-warning {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.75rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.badge-success {
+  background: rgba(0, 200, 83, 0.12);
+  color: var(--success);
+}
+
+.badge-danger {
+  background: rgba(255, 59, 48, 0.12);
+  color: var(--danger);
+}
+
+.badge-warning {
+  background: rgba(255, 149, 0, 0.14);
+  color: var(--warning);
+}
+
+.stButton > button {
+  border-radius: 999px !important;
+  padding: 0.55rem 0.95rem !important;
+  background: var(--primary) !important;
+  color: white !important;
+  border: none !important;
+  font-weight: 700;
+}
+
+.stButton > button:hover {
+  filter: brightness(1.03);
+  transform: translateY(-1px);
+}
+
+@media (max-width: 768px) {
+  .block-container {
+    padding: 0.7rem !important;
+  }
+
+  h1 {
+    font-size: 1.2rem !important;
+  }
+
+  h2 {
+    font-size: 1.02rem !important;
+  }
+
+  p,
+  .stMarkdown,
+  .stTextInput,
+  .stSelectbox,
+  .stTextArea,
+  .stButton button,
+  .stDataFrame,
+  .stMetric,
+  .stTabs {
+    font-size: 0.8rem !important;
+  }
+
+  .card,
+  .kpi-card,
+  .workspace-panel,
+  .hero-shell,
+  .action-card,
+  .page-panel,
+  .form-panel,
+  .summary-card,
+  .info-card,
+  .metric-shell {
+    padding: 0.75rem;
+    border-radius: 14px;
+  }
+
+  [data-testid="stDataFrame"] thead th,
+  [data-testid="stDataFrame"] tbody td {
+    padding: 0.45rem 0.5rem !important;
+    font-size: 0.72rem !important;
+  }
+
+  .stButton > button {
+    width: 100%;
+  }
+
+  div[data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+  }
+
+  div[data-testid="stHorizontalBlock"] > div:nth-child(2) {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+  }
+
+  div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
+    width: 100% !important;
+    min-width: 100% !important;
+    max-width: 100% !important;
+  }
+}

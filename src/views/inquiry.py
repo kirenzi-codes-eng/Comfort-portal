@@ -113,66 +113,68 @@ def _render_inquiry_styles() -> None:
             box-sizing: border-box;
         }
         .inquiry-hero {
-            background: linear-gradient(135deg, #0f4c81 0%, #2563eb 45%, #14b8a6 100%);
-            border-radius: 24px;
-            padding: 24px;
-            color: white;
-            box-shadow: 0 18px 40px rgba(15, 76, 129, 0.22);
-            margin-bottom: 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            max-width: 100%;
-            overflow-wrap: anywhere;
-        }
-        .inquiry-card {
-            border-radius: 18px;
-            padding: 16px 18px;
+            background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 14px 14px 12px;
+            color: #0f172a;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
             margin-bottom: 12px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
-            border: 1px solid rgba(255,255,255,0.7);
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            max-width: 100%;
-            overflow-wrap: anywhere;
-        }
-        .inquiry-card-open {
-            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-        }
-        .inquiry-card-resolved {
-            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
-        }
-        .inquiry-pill {
-            display: inline-block;
-            padding: 6px 10px;
-            border-radius: 999px;
-            font-size: 0.78rem;
-            font-weight: 700;
-            margin-bottom: 4px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            width: fit-content;
-        }
-        .inquiry-pill-open {
-            background: #dbeafe;
-            color: #1d4ed8;
-        }
-        .inquiry-pill-resolved {
-            background: #d1fae5;
-            color: #047857;
-        }
-        .inquiry-form-card {
-            background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
-            border: 1px solid #dbeafe;
-            border-radius: 20px;
-            padding: 18px;
-            margin-bottom: 16px;
             display: flex;
             flex-direction: column;
             gap: 6px;
             max-width: 100%;
             overflow-wrap: anywhere;
+        }
+        .inquiry-card {
+            border-radius: 12px;
+            padding: 12px 12px 10px;
+            margin-bottom: 10px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+            border: 1px solid #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            background: #ffffff;
+        }
+        .inquiry-card-open {
+            background: #ffffff;
+        }
+        .inquiry-card-resolved {
+            background: #f8f9fa;
+        }
+        .inquiry-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            width: fit-content;
+        }
+        .inquiry-pill-open {
+            background: #fdecee;
+            color: #dc3545;
+        }
+        .inquiry-pill-resolved {
+            background: #eafaf0;
+            color: #28a745;
+        }
+        .inquiry-form-card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            margin-bottom: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
         }
         .inquiry-hero-title,
         .inquiry-card-title,
@@ -185,34 +187,21 @@ def _render_inquiry_styles() -> None:
         .inquiry-card-meta,
         .inquiry-form-copy {
             margin: 0;
-            line-height: 1.5;
+            line-height: 1.45;
         }
         @media screen and (max-width: 768px) {
             .inquiry-hero {
-                padding: 18px;
-                border-radius: 18px;
-            }
-            .inquiry-hero-title {
-                font-size: calc(1.35rem * 0.85);
-            }
-            .inquiry-hero-copy,
-            .inquiry-card-message,
-            .inquiry-card-meta,
-            .inquiry-form-copy {
-                font-size: calc(1rem * 0.84);
-            }
-            .inquiry-card-title,
-            .inquiry-form-title {
-                font-size: calc(1.02rem * 0.84);
+                padding: 12px;
+                border-radius: 12px;
             }
             .inquiry-card,
             .inquiry-form-card {
-                padding: 14px;
-                border-radius: 16px;
+                padding: 10px;
+                border-radius: 10px;
             }
             .inquiry-pill {
-                font-size: calc(0.78rem * 0.85);
-                padding: 5px 9px;
+                font-size: 0.68rem;
+                padding: 0.18rem 0.5rem;
             }
         }
         </style>

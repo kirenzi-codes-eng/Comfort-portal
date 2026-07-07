@@ -1,19 +1,35 @@
 from __future__ import annotations
 import base64
 import importlib.util
+import logging
+import os
 from pathlib import Path
 from typing import Any
-import logging
 import streamlit as st
 from PIL import Image
 import io
+
+ROOT = Path(__file__).resolve().parent
+STYLE_CSS_PATH = ROOT / "style.css"
 
 APP_NAME = "Comfort Group Portal"
 APP_SHORT_NAME = "Comfort Portal"
 APP_THEME_COLOR = "#2563eb"
 
-ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
+
+
+def load_css() -> None:
+    if not STYLE_CSS_PATH.exists():
+        return
+
+    if st.session_state.get("global_css_loaded", False):
+        return
+
+    with STYLE_CSS_PATH.open("r", encoding="utf-8") as handle:
+        st.markdown(f"<style>{handle.read()}</style>", unsafe_allow_html=True)
+
+    st.session_state["global_css_loaded"] = True
 
 # Set global page config early to override Streamlit branding.
 # Load local logo.png safely with PIL and use it as the page icon.
@@ -23,7 +39,7 @@ try:
         _logo_img = Image.open(logo_path)
         try:
             # Convert and resize to recommended favicon size to avoid large icons
-            resample_filter = getattr(Image, "Resampling", Image).LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+            resample_filter = getattr(getattr(Image, "Resampling", None), "LANCZOS", None) or getattr(Image, "LANCZOS", None)
             _logo_img = _logo_img.convert("RGBA")
             _logo_img = _logo_img.resize((32, 32), resample_filter)
         except Exception:
@@ -272,6 +288,7 @@ def build_navigation_sections(user_role: str | None = None) -> list[Any]:
     return page_list
 
 def main() -> None:
+    load_css()
     logged_in = bool(st.session_state.get("logged_in", False))
     apply_shell_layout(logged_in)
 
@@ -322,7 +339,7 @@ def main() -> None:
         logo_path = ROOT / "logo.png"
         if logo_path.exists():
             st.sidebar.markdown("---")
-            st.sidebar.image(str(logo_path), use_container_width=True)
+            st.sidebar.image(str(logo_path), width='stretch')
 
         # Logout processing block
         if st.sidebar.button("Logout"):
@@ -340,20 +357,25 @@ if __name__ == "__main__":
     )
     try:
         main()
-    except Exception:
+    except Exception as exc:
         logging.error("Unexpected application error:", exc_info=True)
-        st.markdown(
-            """
-            <div style="max-width: 840px; margin: 28px auto; padding: 24px; border-radius: 22px; background: linear-gradient(135deg, #eef2ff 0%, #dbeafe 100%); border: 1px solid #bfdbfe; box-shadow: 0 18px 45px rgba(30, 64, 175, 0.08);">
-                <h2 style="margin: 0 0 12px; color: #1e3a8a; font-size: 1.55rem; font-weight: 700;">Connection delay detected</h2>
-                <p style="margin: 0 0 14px; color: #475569; font-size: 1rem; line-height: 1.7;">
-                    We’re experiencing a temporary network or database delay. The portal is pausing while we reconnect gracefully.
-                </p>
-                <p style="margin: 0; color: #0f172a; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.01em;">
-                    Please wait a moment and then refresh if the issue persists.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+
+        debug_mode = str(os.getenv("APP_DEBUG", "false")).strip().lower() == "true"
+        if debug_mode:
+            st.exception(exc)
+        else:
+            st.markdown(
+                """
+                <div style="max-width: 840px; margin: 28px auto; padding: 24px; border-radius: 22px; background: linear-gradient(135deg, #eef2ff 0%, #dbeafe 100%); border: 1px solid #bfdbfe; box-shadow: 0 18px 45px rgba(30, 64, 175, 0.08);">
+                    <h2 style="margin: 0 0 12px; color: #1e3a8a; font-size: 1.55rem; font-weight: 700;">Connection delay detected</h2>
+                    <p style="margin: 0 0 14px; color: #475569; font-size: 1rem; line-height: 1.7;">
+                        We’re experiencing a temporary network or database delay. The portal is pausing while we reconnect gracefully.
+                    </p>
+                    <p style="margin: 0; color: #0f172a; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.01em;">
+                        Please wait a moment and then refresh if the issue persists.
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         st.stop()

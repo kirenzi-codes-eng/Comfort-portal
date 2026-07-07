@@ -27,7 +27,7 @@ def hash_password(password: str) -> str:
     return hashed.decode("utf-8")
 
 
-def check_password(password: str, hashed: bytes | str) -> bool:
+def check_password(password: str, hashed: Optional[bytes | str]) -> bool:
     if not password or hashed is None:
         return False
 
@@ -360,6 +360,33 @@ def auth_ui():
     if "_login_in_progress" not in st.session_state:
         st.session_state._login_in_progress = False
 
+    st.markdown(
+        """
+        <style>
+        @media (max-width: 768px) {
+          div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+          }
+          div[data-testid="stHorizontalBlock"] > div:nth-child(2) {
+            display: none !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            max-width: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            overflow: hidden !important;
+          }
+          div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
+            width: 100% !important;
+            min-width: 100% !important;
+            max-width: 100% !important;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     left_col, right_col = st.columns(2, gap="large")
 
     with left_col:
@@ -373,7 +400,7 @@ def auth_ui():
         # LOGIN TAB
         with tabs[0]:
             with st.form("login_form"):
-                identifier = st.text_input("Member ID or Email", placeholder="MEM001 or name@example.com")
+                identifier = st.text_input("Member ID or Email", placeholder="CBO-001 or name@example.com")
                 password = st.text_input("Password", type="password")
                 submitted = st.form_submit_button("Log in", disabled=st.session_state._login_in_progress)
 
@@ -440,7 +467,7 @@ def auth_ui():
                         st.success(f"Registration successful — remember your Member ID: {member_id}")
 
     with right_col:
-        st.image("logo.png", use_container_width=True)
+        st.image("logo.png", width='stretch')
 
 
 if __name__ == "__main__":

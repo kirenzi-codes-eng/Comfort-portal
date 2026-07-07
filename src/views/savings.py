@@ -4,9 +4,10 @@ from datetime import datetime
 from typing import List, Tuple
 
 from src.database.connection import execute_query
-from src.utils.balances import get_effective_member_balance, get_effective_pool_balance
+from src.utils.balances import get_effective_pool_balance
 
 
+@st.cache_data(ttl=300)
 def fetch_portfolio_metrics() -> dict:
     total_paid = get_effective_pool_balance()
     rows = execute_query(
@@ -18,6 +19,7 @@ def fetch_portfolio_metrics() -> dict:
     return {"total_paid": total_paid, "member_count": member_count}
 
 
+@st.cache_data(ttl=300)
 def fetch_member_dropdown_options() -> List[Tuple[str, str]]:
     rows = execute_query(
         "SELECT member_id, full_name FROM members ORDER BY full_name;",
@@ -29,18 +31,40 @@ def fetch_member_dropdown_options() -> List[Tuple[str, str]]:
     return [(row["member_id"], row["full_name"]) for row in rows]
 
 
+@st.cache_data(ttl=300)
 def fetch_subscription_ledger(limit: int = 20, expected_per_month: int = 20000, months_elapsed: int | None = None) -> pd.DataFrame:
     if months_elapsed is None:
         months_elapsed = datetime.today().month
-
+    # Aggregate member payment totals and withdrawals in a single query to avoid
+    # N+1 queries when computing per-member balances.
     rows = execute_query(
-        "SELECT m.member_id, m.full_name, COUNT(DISTINCT s.billing_month) AS paid_months "
-        "FROM members m "
-        "LEFT JOIN subscriptions s ON s.member_id = m.member_id "
-        "AND EXTRACT(YEAR FROM s.billing_month) = EXTRACT(YEAR FROM CURRENT_DATE) "
-        "GROUP BY m.member_id, m.full_name "
-        "ORDER BY m.full_name "
-        "LIMIT %s;",
+        """
+        WITH paid_months AS (
+            SELECT member_id, COUNT(DISTINCT billing_month) AS paid_months
+            FROM subscriptions
+            WHERE EXTRACT(YEAR FROM billing_month) = EXTRACT(YEAR FROM CURRENT_DATE)
+            GROUP BY member_id
+        ),
+        total_paid AS (
+            SELECT member_id, COALESCE(SUM(amount_paid),0) AS total_paid
+            FROM subscriptions
+            GROUP BY member_id
+        ),
+        total_withdrawn AS (
+            SELECT member_id, COALESCE(SUM(amount),0) AS total_withdrawn
+            FROM member_balance_adjustments
+            WHERE adjustment_type = 'withdrawal'
+            GROUP BY member_id
+        )
+        SELECT m.member_id, m.full_name, COALESCE(pm.paid_months,0) AS paid_months,
+               COALESCE(tp.total_paid,0) AS total_paid, COALESCE(tw.total_withdrawn,0) AS total_withdrawn
+        FROM members m
+        LEFT JOIN paid_months pm ON pm.member_id = m.member_id
+        LEFT JOIN total_paid tp ON tp.member_id = m.member_id
+        LEFT JOIN total_withdrawn tw ON tw.member_id = m.member_id
+        ORDER BY m.full_name
+        LIMIT %s;
+        """,
         params=(limit,),
         fetch=True,
     )
@@ -60,11 +84,11 @@ def fetch_subscription_ledger(limit: int = 20, expected_per_month: int = 20000, 
     ledger = []
     for row in rows:
         member_id = row.get("member_id")
-        paid = get_effective_member_balance(member_id) if member_id else 0.0
+        total_paid = float(row.get("total_paid") or 0.0)
+        total_withdrawn = float(row.get("total_withdrawn") or 0.0)
+        paid = max(total_paid - total_withdrawn, 0.0)
         arrears = max(0.0, expected_per_month * months_elapsed - paid)
-        status = (
-            "Current" if arrears <= 0 else f"UGX {int(round(arrears)):,} overdue"
-        )
+        status = ("Current" if arrears <= 0 else f"UGX {int(round(arrears)):,} overdue")
         ledger.append(
             {
                 "Member Account": f"{row.get('member_id')} — {row.get('full_name')}",
@@ -131,6 +155,46 @@ def savings_view() -> None:
           padding: 28px 24px;
           color: #ffffff;
           margin-bottom: 36px;
+        }
+
+        .ledger-hero-card {
+          background: linear-gradient(135deg, #0F2A4D 0%, #154C8A 100%);
+          border: 1px solid rgba(255,255,255,0.16);
+          border-radius: 20px;
+          padding: 18px 20px;
+          box-shadow: 0 16px 36px rgba(15, 42, 77, 0.22);
+          margin-bottom: 16px;
+          color: #ffffff;
+        }
+
+        .ledger-hero-card .ledger-title {
+          font-size: 1.25rem;
+          font-weight: 800;
+          line-height: 1.15;
+          letter-spacing: -0.02em;
+          color: #ffffff;
+        }
+
+        .ledger-hero-card .ledger-subtitle {
+          margin-top: 6px;
+          color: rgba(255,255,255,0.86);
+          font-size: 0.86rem;
+          line-height: 1.6;
+          max-width: 720px;
+        }
+
+        .ledger-pill {
+          display: inline-flex;
+          align-items: center;
+          background: rgba(255,255,255,0.14);
+          border: 1px solid rgba(255,255,255,0.22);
+          border-radius: 999px;
+          padding: 6px 10px;
+          font-size: 0.72rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: #ffffff;
         }
 
         .hero-banner .hero-title {
@@ -222,54 +286,48 @@ def savings_view() -> None:
 
     st.markdown(
         """
-        <div style="display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom: 30px;">
-          <div style="max-width:720px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 28px; padding: 28px 30px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.06);">
-            <div style="font-size:2.75rem; font-weight:800; color:#0f172a; line-height:1.02; letter-spacing:-0.035em;">Subscriptions Ledger</div>
-            <div style="margin-top:14px; color: #475569; font-size:1rem; line-height:1.85; max-width:680px;">
+        <div class="ledger-hero-card" style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px;">
+          <div style="max-width:760px;">
+            <div class="ledger-title">Subscriptions Ledger</div>
+            <div class="ledger-subtitle">
               See each member’s total subscription payments and current arrears in one clear view.
             </div>
           </div>
-          <div style="background:#eff6ff; border:1px solid #dbeafe; border-radius:22px; padding:20px 24px; min-width:220px;">
-            <div style="font-size:0.75rem; font-weight:700; color:#0f172a; text-transform:uppercase; letter-spacing:0.16em;">Dashboard focus</div>
-            <div style="margin-top:10px; font-size:1rem; font-weight:700; color:#1d4ed8;">Member totals + arrears</div>
-          </div>
+          <div class="ledger-pill">Member totals + arrears</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    metrics = fetch_portfolio_metrics()
-    total_paid = metrics["total_paid"]
-    member_count = metrics["member_count"]
-    cycle_percent = min(100, int((member_count / max(member_count, 8)) * 100)) if member_count else 0
-    months_elapsed = datetime.today().month
-    ledger_df = fetch_subscription_ledger(limit=20, months_elapsed=months_elapsed)
+    with st.spinner("Loading data..."):
+        metrics = fetch_portfolio_metrics()
+        total_paid = metrics["total_paid"]
+        member_count = metrics["member_count"]
+        cycle_percent = min(100, int((member_count / max(member_count, 8)) * 100)) if member_count else 0
+        months_elapsed = datetime.today().month
+        ledger_df = fetch_subscription_ledger(limit=20, months_elapsed=months_elapsed)
 
     st.markdown(
         f"""
-        <div class="hero-banner">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:20px; flex-wrap:wrap;">
-            <div style="min-width:220px;">
-              <div class="hero-title">Portfolio Overview Balance</div>
-              <div style="font-size:2.4rem; font-weight:800; letter-spacing:0.01em;">UGX {total_paid:,.0f}</div>
-            </div>
-            <div style="display:flex; gap:16px; flex-wrap:wrap; width:min(100%, 520px);">
-              <div class="hero-metric">
-                <strong>Total Capital Pool</strong>
-                <span>UGX {total_paid:,.0f}</span>
-              </div>
-              <div class="hero-metric">
-                <strong>Cycle Collections</strong>
-                <span>{cycle_percent}% Complete</span>
-              </div>
-            </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 12px;">
+          <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+            <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#0066FF; font-weight:700;">Portfolio Overview Balance</div>
+            <div style="font-size:1.25rem; font-weight:800; letter-spacing:0.01em; margin-top:4px; color:#0066FF;">UGX {total_paid:,.0f}</div>
+          </div>
+          <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+            <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#00C853; font-weight:700;">Total Capital Pool</div>
+            <div style="font-size:1.25rem; font-weight:800; letter-spacing:0.01em; margin-top:4px; color:#00C853;">UGX {total_paid:,.0f}</div>
+          </div>
+          <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+            <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6C757D; font-weight:700;">Cycle Collections</div>
+            <div style="font-size:1.25rem; font-weight:800; letter-spacing:0.01em; margin-top:4px; color:#1A1A1A;">{cycle_percent}% Complete</div>
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    left_col, right_col = st.columns([7, 3], gap="large")
+    left_col, right_col = st.columns([7, 3], gap="small")
 
     with left_col:
         st.markdown(
@@ -281,7 +339,12 @@ def savings_view() -> None:
             """,
             unsafe_allow_html=True,
         )
-        st.dataframe(ledger_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            ledger_df,
+            width="stretch",
+            hide_index=True,
+            column_config={column: {"width": "small"} for column in ledger_df.columns},
+        )
 
         st.markdown(
             """

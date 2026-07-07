@@ -2,6 +2,34 @@ from datetime import date, datetime
 from typing import Optional
 
 
+def normalize_membership_status(status: Optional[str]) -> str:
+    if status is None:
+        return "Pending"
+
+    normalized = str(status).strip().lower()
+    if not normalized:
+        return "Pending"
+
+    aliases = {
+        "full",
+        "full member",
+        "full_member",
+        "full-members",
+        "full-member",
+        "full members",
+    }
+    if normalized in aliases:
+        return "Full Member"
+
+    if normalized in {"active", "partial"}:
+        return "Active"
+
+    if normalized in {"inactive", "probationary", "pending"}:
+        return "Pending" if normalized in {"pending", "probationary"} else "Inactive"
+
+    return str(status).strip() or "Pending"
+
+
 def get_membership_status_for_db(join_date: Optional[date | str | datetime], saving_balance: float = 0, arrears_balance: float = 0) -> str:
     if join_date is None:
         return "Pending"
@@ -36,4 +64,4 @@ def get_membership_status_for_db(join_date: Optional[date | str | datetime], sav
         return "Inactive"
     if saving_balance < 100000:
         return "Active"
-    return "Full"
+    return "Full Member"

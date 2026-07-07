@@ -556,7 +556,7 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
                 }
             )
             tracker_df["Amount"] = tracker_df["Amount"].map(lambda v: f"UGX {v:,.0f}")
-            st.dataframe(tracker_df, use_container_width=True, hide_index=True)
+            st.dataframe(tracker_df, width='stretch', hide_index=True)
         else:
             st.info("No approved withdrawals yet.")
 
@@ -654,25 +654,57 @@ def member_view(member_id: str):
         st.info("Sharing is not active yet. The Chairperson must activate it first.")
 
 
+@st.cache_data(show_spinner=False, ttl=300)
 def fetch_members_overview(limit: int = 50) -> List[Dict]:
     rows = execute_query(
         "SELECT member_id, full_name FROM members ORDER BY full_name LIMIT %s;",
         params=(limit,),
         fetch=True,
     )
-    members = []
+    members: List[Dict] = []
     if not rows:
         return members
+
     engine = calculate_dividends()
     total_interest = engine["total_interest"]
     member_rebate_pool = engine["member_rebate_pool"]
     global_per_member = engine["global_per_member"]
 
+    member_ids = [r["member_id"] for r in rows]
+    if not member_ids:
+        return members
+
+    # Batch fetch total_paid per member
+    paid_rows = execute_query(
+        "SELECT member_id, COALESCE(SUM(amount_paid),0) AS total_paid FROM subscriptions WHERE member_id = ANY(%s) GROUP BY member_id;",
+        params=(member_ids,),
+        fetch=True,
+    ) or []
+    paid_map = {r["member_id"]: float(r["total_paid"] or 0) for r in paid_rows}
+
+    # Batch fetch total_withdrawn per member
+    withdrawn_rows = execute_query(
+        "SELECT member_id, COALESCE(SUM(amount),0) AS total_withdrawn FROM member_balance_adjustments WHERE adjustment_type = 'withdrawal' AND member_id = ANY(%s) GROUP BY member_id;",
+        params=(member_ids,),
+        fetch=True,
+    ) or []
+    withdrawn_map = {r["member_id"]: float(r["total_withdrawn"] or 0) for r in withdrawn_rows}
+
+    # Batch fetch member interest
+    interest_rows = execute_query(
+        "SELECT member_id, COALESCE(SUM(interest_accumulated),0) AS member_interest FROM loans WHERE member_id = ANY(%s) GROUP BY member_id;",
+        params=(member_ids,),
+        fetch=True,
+    ) or []
+    interest_map = {r["member_id"]: float(r["member_interest"] or 0) for r in interest_rows}
+
     for r in rows:
         mid = r["member_id"]
         name = r["full_name"]
-        total_savings = fetch_total_savings(mid)
-        member_interest = fetch_member_interest(mid)
+        total_paid = paid_map.get(mid, 0.0)
+        total_withdrawn = withdrawn_map.get(mid, 0.0)
+        total_savings = max(total_paid - total_withdrawn, 0.0)
+        member_interest = interest_map.get(mid, 0.0)
         rebate_share = 0.0
         if total_interest > 0:
             rebate_share = (member_interest / total_interest) * member_rebate_pool
@@ -745,11 +777,13 @@ def sharing_view():
 
     # Executive controls
     if user_role in ("Treasurer", "Chairperson"):
-        members = fetch_members_overview(limit=50)
-        total_members = len(members)
-        total_savings = sum(m["total_savings"] for m in members)
-        total_dividend = sum(m["dividend_share"] for m in members)
-        total_net = sum(m["net_payout"] for m in members)
+        with st.spinner("Loading data..."):
+            members = fetch_members_overview(limit=50)
+            total_members = len(members)
+            total_savings = sum(m["total_savings"] for m in members)
+            total_dividend = sum(m["dividend_share"] for m in members)
+            total_net = sum(m["net_payout"] for m in members)
+        
 
         st.markdown(
             f"""
@@ -786,7 +820,7 @@ def sharing_view():
             exec_df["Total Savings"] = exec_df["Total Savings"].map(lambda v: f"UGX {v:,.0f}")
             exec_df["Dividend Share"] = exec_df["Dividend Share"].map(lambda v: f"UGX {v:,.0f}")
             exec_df["Net Payout"] = exec_df["Net Payout"].map(lambda v: f"UGX {v:,.0f}")
-            st.dataframe(exec_df, use_container_width=True, hide_index=True)
+            st.dataframe(exec_df, width='stretch', hide_index=True)
 
             if st.button("Generate PDF Report"):
                 try:
