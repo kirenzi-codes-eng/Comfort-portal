@@ -11,6 +11,8 @@ import streamlit as st
 
 class DatabaseUnavailableError(RuntimeError):
     """Raised when the application cannot establish a database connection."""
+    pass
+
 
 logger = logging.getLogger(__name__)
 
