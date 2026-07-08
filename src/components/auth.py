@@ -94,6 +94,36 @@ def _load_remembered_identifier() -> str:
     return ""
 
 
+def _ensure_member_profile_columns() -> None:
+    try:
+        execute_query(
+            """
+            ALTER TABLE members
+            ADD COLUMN IF NOT EXISTS join_date DATE,
+            ADD COLUMN IF NOT EXISTS notes TEXT,
+            ADD COLUMN IF NOT EXISTS avatar_url TEXT,
+            ADD COLUMN IF NOT EXISTS date_of_birth DATE,
+            ADD COLUMN IF NOT EXISTS gender TEXT,
+            ADD COLUMN IF NOT EXISTS address TEXT,
+            ADD COLUMN IF NOT EXISTS city TEXT,
+            ADD COLUMN IF NOT EXISTS country TEXT,
+            ADD COLUMN IF NOT EXISTS nationality TEXT,
+            ADD COLUMN IF NOT EXISTS occupation TEXT,
+            ADD COLUMN IF NOT EXISTS employer TEXT,
+            ADD COLUMN IF NOT EXISTS national_id TEXT,
+            ADD COLUMN IF NOT EXISTS next_of_kin_name TEXT,
+            ADD COLUMN IF NOT EXISTS next_of_kin_relationship TEXT,
+            ADD COLUMN IF NOT EXISTS next_of_kin_phone TEXT,
+            ADD COLUMN IF NOT EXISTS emergency_contact_name TEXT,
+            ADD COLUMN IF NOT EXISTS emergency_contact_phone TEXT;
+            """,
+            params=None,
+            fetch=False,
+        )
+    except Exception as exc:
+        st.warning(f"Unable to prepare member profile fields: {exc}")
+
+
 def _save_remembered_identifier(identifier: str) -> None:
     try:
         path = _remembered_login_path()
@@ -112,8 +142,30 @@ def _clear_remembered_identifier() -> None:
         pass
 
 
-def register_member(full_name: str, email: str, phone: str, password: str) -> Optional[str]:
+def register_member(
+    full_name: str,
+    email: str,
+    phone: str,
+    password: str,
+    date_of_birth: Optional[object] = None,
+    gender: Optional[str] = None,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    country: Optional[str] = None,
+    nationality: Optional[str] = None,
+    occupation: Optional[str] = None,
+    employer: Optional[str] = None,
+    national_id: Optional[str] = None,
+    next_of_kin_name: Optional[str] = None,
+    next_of_kin_relationship: Optional[str] = None,
+    next_of_kin_phone: Optional[str] = None,
+    emergency_contact_name: Optional[str] = None,
+    emergency_contact_phone: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> Optional[str]:
     try:
+        _ensure_member_profile_columns()
+
         existing = execute_query(
             "SELECT 1 AS exists_flag FROM members WHERE email = %s LIMIT 1;",
             params=(email,),
@@ -133,10 +185,55 @@ def register_member(full_name: str, email: str, phone: str, password: str) -> Op
         pw_hash = hash_password(password)
         execute_query(
             """
-            INSERT INTO members (member_id, full_name, email, phone, password_hash, role, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO members (
+                member_id,
+                full_name,
+                email,
+                phone,
+                password_hash,
+                role,
+                status,
+                notes,
+                date_of_birth,
+                gender,
+                address,
+                city,
+                country,
+                nationality,
+                occupation,
+                employer,
+                national_id,
+                next_of_kin_name,
+                next_of_kin_relationship,
+                next_of_kin_phone,
+                emergency_contact_name,
+                emergency_contact_phone
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            params=(member_id, full_name, email, phone, pw_hash, "Member", "Pending"),
+            params=(
+                member_id,
+                full_name,
+                email,
+                phone,
+                pw_hash,
+                "Member",
+                "Pending",
+                notes,
+                date_of_birth,
+                gender,
+                address,
+                city,
+                country,
+                nationality,
+                occupation,
+                employer,
+                national_id,
+                next_of_kin_name,
+                next_of_kin_relationship,
+                next_of_kin_phone,
+                emergency_contact_name,
+                emergency_contact_phone,
+            ),
             fetch=False,
         )
         return member_id
@@ -408,19 +505,24 @@ def auth_ui():
           div[data-testid="stHorizontalBlock"] {
             flex-wrap: wrap !important;
           }
-          div[data-testid="stHorizontalBlock"] > div:nth-child(2) {
-            display: none !important;
-            width: 0 !important;
-            min-width: 0 !important;
-            max-width: 0 !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            overflow: hidden !important;
-          }
-          div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
+          div[data-testid="stHorizontalBlock"] > div {
             width: 100% !important;
             min-width: 100% !important;
             max-width: 100% !important;
+            padding: 0 !important;
+            margin: 0 !important;
+          }
+          div[data-testid="stHorizontalBlock"] > div > div {
+            width: 100% !important;
+          }
+          .block-container {
+            max-width: 100% !important;
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
+          }
+          [data-testid="stAppViewContainer"] {
+            padding-left: 0 !important;
+            padding-right: 0 !important;
           }
         }
         </style>
@@ -493,13 +595,31 @@ def auth_ui():
         # REGISTER TAB
         with tabs[1]:
             with st.form("register_form"):
+                st.markdown("### Personal Information")
                 col1, col2 = st.columns(2)
                 with col1:
                     full_name = st.text_input("Full Name")
                     email = st.text_input("Email")
-                with col2:
                     phone = st.text_input("Phone Number")
-                    password = st.text_input("Password", type="password")
+                    date_of_birth = st.date_input("Date of Birth", value=None)
+                    gender = st.selectbox("Gender", ["", "Male", "Female", "Other", "Prefer not to say"], index=0)
+                    address = st.text_input("Address")
+                    city = st.text_input("City")
+                with col2:
+                    country = st.text_input("Country")
+                    nationality = st.text_input("Nationality")
+                    occupation = st.text_input("Occupation")
+                    employer = st.text_input("Employer")
+                    national_id = st.text_input("National ID")
+                    next_of_kin_name = st.text_input("Next of Kin Name")
+                    next_of_kin_relationship = st.text_input("Next of Kin Relationship")
+                    next_of_kin_phone = st.text_input("Next of Kin Phone")
+                emergency_contact_name = st.text_input("Emergency Contact Name")
+                emergency_contact_phone = st.text_input("Emergency Contact Phone")
+                notes = st.text_area("Notes")
+
+                st.markdown("### Account Security")
+                password = st.text_input("Password", type="password")
                 confirm = st.text_input("Confirm Password", type="password")
 
                 reg_submitted = st.form_submit_button("Create Account")
@@ -507,14 +627,34 @@ def auth_ui():
             if reg_submitted:
                 # basic validation
                 if not full_name or not email or not phone or not password or not confirm:
-                    st.toast("All fields are required.", icon="⚠️")
+                    st.toast("Please complete all required fields.", icon="⚠️")
                 elif password != confirm:
                     st.toast("Passwords do not match.", icon="⚠️")
                 elif not re.match(r"[^@]+@[^@]+\.[^@]+", email):
                     st.toast("Please enter a valid email address.", icon="⚠️")
                 else:
                     # attempt registration
-                    member_id = register_member(full_name.strip(), email.strip().lower(), phone.strip(), password)
+                    member_id = register_member(
+                        full_name.strip(),
+                        email.strip().lower(),
+                        phone.strip(),
+                        password,
+                        date_of_birth=date_of_birth,
+                        gender=gender.strip() or None,
+                        address=address.strip() or None,
+                        city=city.strip() or None,
+                        country=country.strip() or None,
+                        nationality=nationality.strip() or None,
+                        occupation=occupation.strip() or None,
+                        employer=employer.strip() or None,
+                        national_id=national_id.strip() or None,
+                        next_of_kin_name=next_of_kin_name.strip() or None,
+                        next_of_kin_relationship=next_of_kin_relationship.strip() or None,
+                        next_of_kin_phone=next_of_kin_phone.strip() or None,
+                        emergency_contact_name=emergency_contact_name.strip() or None,
+                        emergency_contact_phone=emergency_contact_phone.strip() or None,
+                        notes=notes.strip() or None,
+                    )
                     if member_id is None:
                         st.toast("Registration failed: email may already be in use.", icon="❌")
                     else:
