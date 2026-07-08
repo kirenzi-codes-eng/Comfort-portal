@@ -9,8 +9,8 @@ from psycopg2.pool import SimpleConnectionPool
 import streamlit as st
 
 
-class DatabaseUnavailableError(RuntimeError):
-    """Raised when the application cannot establish a database connection."""
+class DatabaseUnavailableError(Exception):
+    """Raised when the database connection cannot be established or acquired from the pool."""
     pass
 
 
@@ -55,9 +55,8 @@ def _resolve_db_dsn() -> str:
     port = os.getenv("DB_PORT", "5432")
 
     if not all([host, dbname, user, password]):
-        raise RuntimeError(
-            "Database configuration not found.\n"
-            "Expected DATABASE_URL (preferred), DB_URL, or DB_HOST/DB_NAME/DB_USER/DB_PASSWORD."
+        raise DatabaseUnavailableError(
+            "Unable to connect to the database. Check your DB host, credentials, and network."
         )
 
     return (
@@ -139,7 +138,7 @@ def get_conn_from_pool():
             except Exception as exc:
                 logger.exception("Unable to open fallback database connection.")
                 raise DatabaseUnavailableError(
-                    "Unable to establish a fallback database connection. Verify database host and network."
+                    "Unable to connect to the database. Check your DB host, credentials, and network."
                 ) from exc
 
         yield conn
