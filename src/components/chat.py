@@ -6,12 +6,17 @@ from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
 import streamlit as st
-
 from src.database.connection import execute_query
 
 
 LAST_N = 50
 UGANDA_TZ = ZoneInfo("Africa/Kampala")
+
+st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+
+ROOMS = [
+    {"key": "main", "title": "💬 Main Chat", "subtitle": "Everything in one place"},
+]
 
 
 def _get_logo_base64() -> str:
@@ -47,120 +52,270 @@ def post_message(member_id: str, sender_name: str, sender_role: str, text: str) 
         st.error(f"Failed to post message: {e}")
 
 
-def _render_chat_styles() -> None:
+def fetch_group_members() -> List[Dict[str, Any]]:
+    try:
+        rows = execute_query(
+            "SELECT member_id, full_name, role FROM members ORDER BY full_name;",
+            params=None,
+            fetch=True,
+        )
+        return rows or []
+    except Exception as e:
+        st.error(f"Failed to load members: {e}")
+        return []
+
+
+def _render_global_styles() -> None:
     st.markdown(
         """
         <style>
-        .chat-shell {
-            border: 1px solid #e5e7eb;
-            border-radius: 22px;
-            overflow: hidden;
-            background: #f8fafc;
-            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+        :root {
+            --bg: #f0f2f5;
+            --surface: #ffffff;
+            --border: #e4e6eb;
+            --accent: #1877f2;
+            --accent-soft: #e7f3ff;
+            --teal: #42b883;
+            --text: #1c1e21;
+            --muted: #65676b;
         }
-        .chat-header {
+        html, body {
+            background: var(--bg) !important;
+            font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        }
+        [data-testid="stAppViewContainer"] {
+            background: var(--bg) !important;
+            padding: 0 !important;
+        }
+        .block-container {
+            padding-top: 0 !important;
+            padding-bottom: 0.25rem !important;
+            padding-left: 0.6rem !important;
+            padding-right: 0.6rem !important;
+            max-width: 100% !important;
+        }
+        .fb-shell {
+            display: flex;
+            flex-direction: column;
+            gap: 0.85rem;
+        }
+        .fb-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        }
+        .fb-sidebar, .fb-details {
+            padding: 0.9rem;
+            background: #ffffff;
+        }
+        .fb-sidebar-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 0.2rem;
+        }
+        .fb-sidebar-subtitle {
+            font-size: 0.82rem;
+            color: var(--muted);
+            margin-bottom: 0.7rem;
+        }
+        .fb-room-item {
             display: flex;
             align-items: center;
-            gap: 12px;
-            padding: 16px 18px;
-            background: #075e54;
-            color: #ffffff;
-            border-bottom: none;
-            margin: 0;
+            gap: 0.6rem;
+            padding: 0.7rem 0.75rem;
+            border-radius: 10px;
+            background: #f7f8fa;
+            margin-bottom: 0.5rem;
+            border: 1px solid #eef0f4;
         }
-        .chat-avatar {
-            width: 42px;
-            height: 42px;
+        .fb-room-item.active {
+            background: var(--accent-soft);
+            border-color: #cfe3ff;
+        }
+        .fb-room-badge {
+            width: 34px;
+            height: 34px;
             border-radius: 50%;
-            background: rgba(255,255,255,0.18);
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: 700;
-            font-size: 0.95rem;
+            background: #ffffff;
+            font-size: 0.9rem;
         }
-        .chat-title {
+        .fb-room-title {
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .fb-room-subtitle {
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+        .fb-thread {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 78vh;
+        }
+        .fb-thread-header {
+            padding: 0.95rem 1rem;
+            border-bottom: 1px solid var(--border);
+            background: #ffffff;
+        }
+        .fb-thread-title {
             font-size: 1rem;
             font-weight: 700;
-        }
-        .chat-subtitle {
-            font-size: 0.82rem;
-            color: rgba(255,255,255,0.82);
-            margin-top: 2px;
-        }
-        .chat-body {
-            padding: 0;
+            color: var(--text);
             margin: 0;
-            max-height: 430px;
+        }
+        .fb-thread-subtitle {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-top: 0.16rem;
+        }
+        .fb-thread-scroll {
+            flex: 1;
             overflow-y: auto;
-            overflow-x: hidden;
-            background: #efeae2;
-            box-sizing: border-box;
-            position: relative;
+            padding: 1rem;
+            background: linear-gradient(180deg, #fff 0%, #f8f9fb 100%);
+            max-height: 70vh;
         }
-        .chat-wallpaper-layer {
-            position: absolute;
-            inset: 0;
-            background-repeat: repeat;
-            background-size: 160px 160px;
-            opacity: 0.15;
-            pointer-events: none;
-            z-index: 0;
-        }
-        .chat-canvas-content {
-            position: relative;
-            z-index: 1;
-            padding: 10px 10px 8px;
-            min-height: 100%;
-        }
-        .msg-row {
+        .fb-message-row {
             display: flex;
-            margin-bottom: 10px;
+            margin-bottom: 0.7rem;
         }
-        .msg-row.self { justify-content: flex-end; }
-        .msg-row.other { justify-content: flex-start; }
-        .msg-bubble {
+        .fb-message-row.me { justify-content: flex-end; }
+        .fb-message-row.other { justify-content: flex-start; }
+        .fb-message-bubble {
             max-width: 78%;
-            padding: 10px 12px;
+            padding: 0.72rem 0.8rem;
             border-radius: 16px;
-            box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
-            line-height: 1.45;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
-        .msg-bubble.self {
-            background: #dcf8c6;
-            color: #111827;
-            border-bottom-right-radius: 4px;
+        .fb-message-bubble.other {
+            background: #f0f2f5;
+            color: var(--text);
         }
-        .msg-bubble.other {
-            background: #ffffff;
-            color: #111827;
-            border-bottom-left-radius: 4px;
+        .fb-message-bubble.me {
+            background: #e7f3ff;
+            color: #0f172a;
         }
-        .msg-sender {
-            font-size: 0.76rem;
+        .fb-message-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            margin-bottom: 0.24rem;
+        }
+        .fb-message-sender {
             font-weight: 700;
-            color: #128c7e;
-            margin-bottom: 3px;
+            font-size: 0.88rem;
         }
-        .msg-text {
-            font-size: 0.95rem;
-            white-space: pre-wrap;
-        }
-        .msg-meta {
+        .fb-message-role {
             font-size: 0.72rem;
-            color: #667085;
-            text-align: right;
-            margin-top: 6px;
+            color: var(--muted);
+            background: rgba(101, 103, 107, 0.12);
+            padding: 0.16rem 0.45rem;
+            border-radius: 999px;
         }
-        .chat-input-wrap {
-            padding: 8px 12px 10px;
-            background: #f7f7f7;
-            border-top: 1px solid #e5e7eb;
-            margin-top: 0;
+        .fb-message-time {
+            font-size: 0.72rem;
+            color: #8a8d91;
         }
-        .chat-input-shell {
-            margin-top: 0;
-            padding: 0;
+        .fb-message-body {
+            font-size: 0.94rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .fb-composer {
+            padding: 0.85rem 1rem 1rem;
+            border-top: 1px solid var(--border);
+            background: #ffffff;
+        }
+        .fb-composer .stTextInput > div > div > input {
+            border-radius: 999px !important;
+            border: 1px solid var(--border) !important;
+            padding: 0.72rem 0.9rem !important;
+            background: #f0f2f5 !important;
+        }
+        .fb-composer button {
+            border-radius: 999px !important;
+            background: var(--accent) !important;
+            color: #ffffff !important;
+            border: none !important;
+            font-weight: 700 !important;
+        }
+        .fb-details-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 0.3rem;
+        }
+        .fb-details-subtitle {
+            font-size: 0.82rem;
+            color: var(--muted);
+            margin-bottom: 0.55rem;
+        }
+        .fb-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #1877f2, #6a5acd);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            margin-bottom: 0.7rem;
+        }
+        .fb-member-row {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            padding: 0.45rem 0.55rem;
+            border-radius: 10px;
+            background: #f7f8fa;
+            margin-bottom: 0.45rem;
+        }
+        .fb-member-initials {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #e7f3ff;
+            color: var(--accent);
+            font-size: 0.74rem;
+            font-weight: 800;
+        }
+        .fb-member-name {
+            font-size: 0.84rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .fb-gallery {
+            display: grid;
+            gap: 0.45rem;
+            margin-top: 0.8rem;
+        }
+        .fb-gallery-item {
+            padding: 0.55rem 0.6rem;
+            border-radius: 10px;
+            background: #f7f8fa;
+            color: var(--text);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+        .desktop-only { display: block; }
+        .mobile-only { display: none; }
+        @media (max-width: 980px) {
+            .desktop-only { display: none !important; }
+            .mobile-only { display: block !important; }
+            .fb-thread-scroll { max-height: 60vh; }
         }
         </style>
         """,
@@ -180,35 +335,26 @@ def _format_timestamp(ts: Any) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
 
-    return ts.astimezone(UGANDA_TZ).strftime("%H:%M")
+    return ts.astimezone(UGANDA_TZ).strftime("%I:%M %p")
 
 
-def _render_message_bubble(message: Dict[str, Any], is_self: bool, user_id: Any) -> None:
-    sender_id = message.get("member_id")
+def _render_message(message: Dict[str, Any], is_self: bool) -> None:
     sender_name = message.get("sender_name") or "Unknown"
     sender_role = message.get("sender_role") or "Member"
     text = message.get("message_text") or ""
     ts = _format_timestamp(message.get("timestamp"))
-    # preserve an ISO timestamp on the element for JS polling
-    raw_ts = ""
-    try:
-        raw_val = message.get("timestamp")
-        if hasattr(raw_val, "isoformat"):
-            raw_ts = raw_val.isoformat()
-        else:
-            raw_ts = str(raw_val or "")
-    except Exception:
-        raw_ts = ""
     display_name = "You" if is_self else sender_name
-    role_label = f" · {escape(sender_role)}" if sender_role else ""
 
     st.markdown(
         f"""
-        <div class="msg-row {'self' if is_self else 'other'}" data-ts="{escape(raw_ts)}">
-          <div class="msg-bubble {'self' if is_self else 'other'}">
-            <div class="msg-sender">{escape(display_name)}{role_label}</div>
-            <div class="msg-text">{escape(text)}</div>
-            <div class="msg-meta">{ts}</div>
+        <div class="fb-message-row {'me' if is_self else 'other'}">
+          <div class="fb-message-bubble {'me' if is_self else 'other'}">
+            <div class="fb-message-meta">
+              <span class="fb-message-sender">{escape(display_name)}</span>
+              <span class="fb-message-role">{escape(sender_role)}</span>
+              <span class="fb-message-time">{escape(ts)}</span>
+            </div>
+            <div class="fb-message-body">{escape(text)}</div>
           </div>
         </div>
         """,
@@ -216,134 +362,134 @@ def _render_message_bubble(message: Dict[str, Any], is_self: bool, user_id: Any)
     )
 
 
-def chat_view():
-    _render_chat_styles()
-    st.markdown("<div class='chat-shell'>", unsafe_allow_html=True)
+def _render_room_list(active_room: str) -> None:
+    st.markdown("<div class='fb-card fb-sidebar'>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-sidebar-title'>Community Rooms</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-sidebar-subtitle'>Browse your group spaces</div>", unsafe_allow_html=True)
+    for room in ROOMS:
+        is_active = room["title"] == active_room
+        st.markdown(
+            f"""
+            <div class='fb-room-item {'active' if is_active else ''}'>
+              <div class='fb-room-badge'>{escape(room['title'][0])}</div>
+              <div>
+                <div class='fb-room-title'>{escape(room['title'])}</div>
+                <div class='fb-room-subtitle'>{escape(room['subtitle'])}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_details_panel(members: List[Dict[str, Any]]) -> None:
+    st.markdown("<div class='fb-card fb-details'>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-avatar'>CP</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-details-title'>Comfort Portal Group</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-details-subtitle'>Private community • social feed style messaging</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-details-subtitle'>🟢 3 members online</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-sidebar-title'>Members</div>", unsafe_allow_html=True)
+    for member in members[:6]:
+        full_name = str(member.get("full_name") or "Unnamed Member").strip() or "Unnamed Member"
+        initials = "".join(part[0].upper() for part in full_name.split()[:2]) or "M"
+        st.markdown(
+            f"""
+            <div class='fb-member-row'>
+              <div class='fb-member-initials'>{escape(initials)}</div>
+              <div class='fb-member-name'>{escape(full_name)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("<div class='fb-gallery'>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-gallery-item'>📄 Loan policy update shared today</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-gallery-item'>🖼️ Profile snapshot shared</div>", unsafe_allow_html=True)
+    st.markdown("<div class='fb-gallery-item'>📁 Savings report attached</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_welcome_header() -> None:
     st.markdown(
         """
-        <div class='chat-header'>
-          <div class='chat-avatar'>GC</div>
-          <div>
-            <div class='chat-title'>Comfort Portal Group</div>
-            <div class='chat-subtitle'>Online · Members are chatting now</div>
-          </div>
+        <div class='fb-thread-header' style='background: linear-gradient(135deg, #1877f2 0%, #3b82f6 100%); border-bottom: 1px solid #1d4ed8; margin-bottom: 0.6rem;'>
+          <div class='fb-thread-title' style='font-size: 1.05rem; color: #ffffff;'>Welcome to the Comfort Portal Chat Space</div>
+          <div class='fb-thread-subtitle' style='font-size: 0.84rem; color: #eaf2ff;'>Say hello, share updates, and connect with everyone here.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def chat_view() -> None:
+    _render_global_styles()
+    st.markdown("<div class='fb-shell'>", unsafe_allow_html=True)
 
     user_id = st.session_state.get("user_id")
     user_name = st.session_state.get("user_name")
     user_role = st.session_state.get("user_role")
 
-    logo_b64 = _get_logo_base64()
-    wallpaper_style = (
-        f"background-image: url('data:image/png;base64,{logo_b64}');"
-        if logo_b64
-        else "background-image: linear-gradient(45deg, rgba(0,0,0,0.03) 25%, transparent 25%, transparent 75%, rgba(0,0,0,0.03) 75%, rgba(0,0,0,0.03));"
-    )
-
-    st.markdown(f"<div class='chat-body'><div class='chat-wallpaper-layer' style='{wallpaper_style}'></div><div class='chat-canvas-content'>", unsafe_allow_html=True)
     if not user_id:
         st.info("Log in to join the group chat.")
-        st.markdown("</div></div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    messages = fetch_messages()
-    for m in messages:
-        _render_message_bubble(m, m.get("member_id") == user_id, user_id)
-    st.markdown("</div></div>", unsafe_allow_html=True)
+    active_room = st.session_state.get("active_room") or ROOMS[0]["title"]
+    _render_welcome_header()
 
-    # Inject a lightweight client-side poller to detect new messages and notify the user.
-    # It fetches the current page HTML every few seconds, extracts the latest message timestamp
-    # and, if newer than the last seen, shows a browser Notification and replaces the chat body.
-    st.markdown(
-        """
-        <script>
-        (function(){
-            try {
-                const POLL_MS = 6000;
-                const storageKey = 'cp_last_chat_ts';
-
-                function parseLatestTsFromDoc(doc) {
-                    const row = doc.querySelector('.chat-body .msg-row[data-ts]');
-                    if(!row) return '';
-                    // last message is the last .msg-row inside chat-body
-                    const rows = doc.querySelectorAll('.chat-body .msg-row[data-ts]');
-                    if(!rows || rows.length === 0) return '';
-                    const last = rows[rows.length - 1];
-                    return last.getAttribute('data-ts') || '';
-                }
-
-                async function pollOnce(){
-                    try {
-                        const res = await fetch(window.location.href, {cache: 'no-store'});
-                        const txt = await res.text();
-                        const parser = new DOMParser();
-                        const doc = parser.parseFromString(txt, 'text/html');
-                        const newTs = parseLatestTsFromDoc(doc);
-                        const oldTs = localStorage.getItem(storageKey) || '';
-                        if(newTs && oldTs && newTs !== oldTs) {
-                            // New message detected
-                            const permission = Notification.permission;
-                            if(permission === 'granted'){
-                                const n = new Notification('Comfort Portal', { body: 'New group chat message' });
-                                setTimeout(()=>n.close(), 5000);
-                            } else if(permission !== 'denied'){
-                                Notification.requestPermission().then(p => { if(p === 'granted'){ new Notification('Comfort Portal', { body: 'New group chat message' }); } });
-                            }
-                            // Replace the chat-body HTML
-                            const newChat = doc.querySelector('.chat-body');
-                            if(newChat){
-                                const el = document.querySelector('.chat-body');
-                                if(el) el.outerHTML = newChat.outerHTML;
-                            }
-                        }
-                        if(newTs) localStorage.setItem(storageKey, newTs);
-                    } catch(e) {
-                        console.debug('chat poll error', e);
-                    }
-                }
-
-                // initialize stored timestamp from current DOM
-                try{
-                    const rows = document.querySelectorAll('.chat-body .msg-row[data-ts]');
-                    if(rows && rows.length) {
-                        const last = rows[rows.length -1];
-                        if(last) localStorage.setItem(storageKey, last.getAttribute('data-ts') || '');
-                    }
-                } catch(_){ }
-
-                if (!('Notification' in window)) {
-                    console.debug('Chat notifications not supported in this browser, poller disabled.');
-                    return;
-                }
-
-                setInterval(pollOnce, POLL_MS);
-            } catch(err){ console.debug('chat-poller-init', err); }
-        })();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.container():
-        st.markdown("<div class='chat-input-shell'>", unsafe_allow_html=True)
-        with st.form("group_chat_form", clear_on_submit=True):
-            col1, col2 = st.columns([4, 1], vertical_alignment="bottom")
-            with col1:
-                msg = st.text_input("", placeholder="Type a message...", label_visibility="collapsed")
-            with col2:
-                submitted = st.form_submit_button("Send", width='stretch')
+    st.markdown("<div class='desktop-only'>", unsafe_allow_html=True)
+    col_thread = st.columns([1])[0]
+    with col_thread:
+        st.markdown("<div class='fb-thread'>", unsafe_allow_html=True)
+        st.markdown("<div class='fb-thread-scroll'>", unsafe_allow_html=True)
+        messages = fetch_messages(limit=LAST_N)
+        for message in messages:
+            _render_message(message, message.get("member_id") == user_id)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    if submitted:
-        if not msg or not str(msg).strip():
-            st.toast("Cannot send empty message.", icon="⚠️")
-        else:
-            post_message(user_id, user_name or "", user_role or "Member", str(msg).strip())
-            st.rerun()
+        st.markdown("<div class='fb-composer'>", unsafe_allow_html=True)
+        with st.form("community_chat_form", clear_on_submit=True):
+            msg = st.text_input(
+                "Message",
+                placeholder="Type a message...",
+                label_visibility="collapsed",
+            )
+            submitted = st.form_submit_button("Send", width="stretch")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if submitted:
+            if not msg or not str(msg).strip():
+                st.toast("Cannot send an empty message.", icon="⚠️")
+            else:
+                post_message(user_id, user_name or "", user_role or "Member", str(msg).strip())
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='mobile-only'>", unsafe_allow_html=True)
+    with st.expander("💬 Conversation", expanded=True):
+        st.markdown("<div class='fb-thread-scroll'>", unsafe_allow_html=True)
+        messages = fetch_messages(limit=LAST_N)
+        for message in messages:
+            _render_message(message, message.get("member_id") == user_id)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<div class='fb-composer'>", unsafe_allow_html=True)
+        with st.form("community_chat_form_mobile", clear_on_submit=True):
+            msg = st.text_input(
+                "Message",
+                placeholder="Type a message...",
+                label_visibility="collapsed",
+            )
+            submitted = st.form_submit_button("Send", width="stretch")
+        st.markdown("</div>", unsafe_allow_html=True)
+        if submitted:
+            if not msg or not str(msg).strip():
+                st.toast("Cannot send an empty message.", icon="⚠️")
+            else:
+                post_message(user_id, user_name or "", user_role or "Member", str(msg).strip())
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 

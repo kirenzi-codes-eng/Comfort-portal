@@ -1,5 +1,6 @@
 import ast
 import io
+import json
 import os
 import re
 from datetime import datetime
@@ -71,6 +72,44 @@ def check_password(password: str, hashed: Optional[bytes | str]) -> bool:
         return bcrypt.checkpw(password.encode("utf-8"), hashed_bytes)
     except (ValueError, TypeError):
         return False
+
+
+def _remembered_login_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".comfort_portal_remembered_login.json")
+
+
+def _load_remembered_identifier() -> str:
+    try:
+        path = _remembered_login_path()
+        if not os.path.exists(path):
+            return ""
+
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        identifier = data.get("identifier") if isinstance(data, dict) else None
+        if isinstance(identifier, str):
+            return identifier.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _save_remembered_identifier(identifier: str) -> None:
+    try:
+        path = _remembered_login_path()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"identifier": identifier.strip()}, handle)
+    except Exception:
+        pass
+
+
+def _clear_remembered_identifier() -> None:
+    try:
+        os.remove(_remembered_login_path())
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 def register_member(full_name: str, email: str, phone: str, password: str) -> Optional[str]:
@@ -359,6 +398,8 @@ def auth_ui():
         st.session_state.logged_in = False
     if "_login_in_progress" not in st.session_state:
         st.session_state._login_in_progress = False
+    if "remember_me" not in st.session_state:
+        st.session_state.remember_me = bool(_load_remembered_identifier())
 
     st.markdown(
         """
@@ -399,9 +440,19 @@ def auth_ui():
 
         # LOGIN TAB
         with tabs[0]:
+            remembered_identifier = _load_remembered_identifier()
             with st.form("login_form"):
-                identifier = st.text_input("Member ID or Email", placeholder="CBO-001 or name@example.com")
+                identifier = st.text_input(
+                    "Member ID or Email",
+                    value=remembered_identifier,
+                    placeholder="CBO-001 or name@example.com",
+                )
                 password = st.text_input("Password", type="password")
+                remember_me = st.checkbox(
+                    "Remember me on this device",
+                    value=bool(remembered_identifier),
+                    help="This saves your Member ID/email so it is ready next time.",
+                )
                 submitted = st.form_submit_button("Log in", disabled=st.session_state._login_in_progress)
 
             if submitted and not st.session_state._login_in_progress:
@@ -426,6 +477,10 @@ def auth_ui():
                                 st.session_state.user_status = row["status"]
                                 st.session_state.join_date = row.get("join_date")
                                 st.session_state._login_in_progress = False
+                                if remember_me:
+                                    _save_remembered_identifier(identifier.strip())
+                                else:
+                                    _clear_remembered_identifier()
                                 st.toast(f"Welcome, {row['full_name']}!", icon="✅")
                                 st.rerun()
                             else:

@@ -9,6 +9,8 @@ import streamlit as st
 from PIL import Image
 import io
 
+from src.database.connection import DatabaseUnavailableError
+
 ROOT = Path(__file__).resolve().parent
 STYLE_CSS_PATH = ROOT / "style.css"
 
@@ -65,7 +67,12 @@ try:
         _logo_icon = None
         _logo_data_uri = None
 
-    st.set_page_config(page_title=APP_NAME, page_icon=_logo_icon or "📘", layout="wide")
+    st.set_page_config(
+        page_title=APP_NAME,
+        page_icon=_logo_icon or "📘",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     st.markdown(
         """
         <style>
@@ -163,7 +170,7 @@ MODULE_CONFIG = {
         },
         {
             "title": "Family Registry",
-            "path": SRC / "views" / "family.py",
+            "path": SRC / "views" / "family_refactored.py",
             "candidates": ["family_view"],
             "icon": "👥",
         },
@@ -327,10 +334,11 @@ def main() -> None:
         
         st.sidebar.markdown(
             f"""
-            <div style="margin-bottom: 18px; padding: 16px 16px 14px; border-radius: 18px; background: #eff6ff; border: 1px solid #dbeafe;">
-                <div style="font-size: 1rem; font-weight: 700; color: #1e3a8a;">{user_name}</div>
-                <div style="font-size: 0.83rem; color: #a8a29e; margin-top: 4px; letter-spacing: 0.02em;">{user_id}</div>
-                <div style="font-size: 0.83rem; color: #22c55e; margin-top: 4px; letter-spacing: 0.01em;">{user_role}</div>
+            <div style="margin-bottom: 18px; padding: 20px 18px; border-radius: 24px; background: #ffffff; border: 1px solid rgba(79, 70, 229, 0.12); box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);">
+                <div style="font-size: 1rem; font-weight: 700; color: #0f172a;">{user_name}</div>
+                <div style="font-size: 0.82rem; color: #6b7280; margin-top: 4px; letter-spacing: 0.02em;">{user_id}</div>
+                <div style="margin-top: 10px; display: inline-flex; align-items: center; gap: 0.5rem;
+                            padding: 0.45rem 0.9rem; border-radius: 999px; background: rgba(79, 70, 229, 0.08); color: #4338ca; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;">{user_role}</div>
             </div>
             """, 
             unsafe_allow_html=True,
@@ -357,6 +365,23 @@ if __name__ == "__main__":
     )
     try:
         main()
+    except DatabaseUnavailableError as exc:
+        logging.error("Database unavailable:", exc_info=True)
+        st.markdown(
+            """
+            <div style="max-width: 840px; margin: 28px auto; padding: 24px; border-radius: 22px; background: linear-gradient(135deg, #f8fafc 0%, #dbeafe 100%); border: 1px solid #bfdbfe; box-shadow: 0 18px 45px rgba(30, 64, 175, 0.08);">
+                <h2 style="margin: 0 0 12px; color: #1e3a8a; font-size: 1.55rem; font-weight: 700;">Database connection unavailable</h2>
+                <p style="margin: 0 0 14px; color: #475569; font-size: 1rem; line-height: 1.7;">
+                    The portal cannot reach the database right now. Please check your database host, credentials, and network connection.
+                </p>
+                <p style="margin: 0; color: #0f172a; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.01em;">
+                    Refresh this page after the database is available.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.stop()
     except Exception as exc:
         logging.error("Unexpected application error:", exc_info=True)
 

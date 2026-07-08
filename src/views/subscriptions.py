@@ -520,16 +520,35 @@ def treasurer_view(user_role: str):
                         st.toast("Enter a positive repayment amount.", icon="⚠️")
                     else:
                         try:
-                            rows = execute_query(
-                                "UPDATE loans SET outstanding_balance = GREATEST(outstanding_balance - %s, 0) "
-                                "WHERE member_id = %s AND status = 'Approved' RETURNING loan_id, outstanding_balance;",
-                                params=(repay_amount, member_id),
+                            loan_rows = execute_query(
+                                "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated "
+                                "FROM loans "
+                                "WHERE member_id = %s AND status IN ('Active','Approved') "
+                                "ORDER BY approved_date DESC NULLS LAST, applied_date DESC, loan_id DESC LIMIT 1;",
+                                params=(member_id,),
                                 fetch=True,
                             )
-                            if rows:
-                                st.toast("Repayment applied to active loan.", icon="✅")
-                            else:
+                            if not loan_rows:
                                 st.info("No active approved loan found for this member.")
+                            else:
+                                loan = loan_rows[0]
+                                loan_id = loan["loan_id"]
+                                outstanding = float(loan.get("outstanding_balance") or 0.0)
+                                interest_accumulated = float(loan.get("interest_accumulated") or 0.0)
+                                principal = max(0.0, outstanding - interest_accumulated)
+
+                                payment_to_principal = min(repay_amount, principal)
+                                overpayment = max(0.0, repay_amount - payment_to_principal)
+                                new_principal = principal - payment_to_principal
+                                new_interest = max(0.0, interest_accumulated - overpayment)
+                                new_outstanding = new_principal + new_interest
+
+                                execute_query(
+                                    "UPDATE loans SET outstanding_balance = %s, interest_accumulated = %s WHERE loan_id = %s;",
+                                    params=(new_outstanding, new_interest, loan_id),
+                                    fetch=False,
+                                )
+                                st.toast("Repayment applied to active loan.", icon="✅")
                         except Exception as e:
                             st.error(f"Failed to apply repayment: {e}")
                 st.markdown("</div>", unsafe_allow_html=True)

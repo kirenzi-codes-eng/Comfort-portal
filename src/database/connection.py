@@ -8,6 +8,10 @@ import psycopg2.extras
 from psycopg2.pool import SimpleConnectionPool
 import streamlit as st
 
+
+class DatabaseUnavailableError(RuntimeError):
+    """Raised when the application cannot establish a database connection."""
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,9 +85,11 @@ def init_db_pool(
             maxconn=maxconn,
             dsn=dsn,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Unable to create database connection pool.")
-        raise
+        raise DatabaseUnavailableError(
+            "Unable to create a database connection pool. Verify database credentials and network connectivity."
+        ) from exc
 
 
 def _normalize_params(
@@ -108,15 +114,31 @@ def get_conn_from_pool():
     conn = None
 
     try:
-        conn = pool.getconn()
+        try:
+            conn = pool.getconn()
+        except (
+            psycopg2.InterfaceError,
+            psycopg2.OperationalError,
+            psycopg2.DatabaseError,
+        ) as exc:
+            logger.exception("Unable to acquire database connection from pool.")
+            raise DatabaseUnavailableError(
+                "Unable to connect to the database. Check your DB host, credentials, and network."
+            ) from exc
 
         if conn.closed:
             logger.warning("Discarding closed connection.")
             pool.putconn(conn, close=True)
-            conn = psycopg2.connect(
-                _resolve_db_dsn(),
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            )
+            try:
+                conn = psycopg2.connect(
+                    _resolve_db_dsn(),
+                    cursor_factory=psycopg2.extras.RealDictCursor,
+                )
+            except Exception as exc:
+                logger.exception("Unable to open fallback database connection.")
+                raise DatabaseUnavailableError(
+                    "Unable to establish a fallback database connection. Verify database host and network."
+                ) from exc
 
         yield conn
 
@@ -170,38 +192,39 @@ def execute_query(
     last_error = None
 
     for _ in range(2):
-
-        with get_conn_from_pool() as conn:
-
-            try:
-                return _execute_on_connection(
-                    conn,
-                    query,
-                    params,
-                    fetch,
-                )
-
-            except (
-                psycopg2.InterfaceError,
-                psycopg2.OperationalError,
-            ) as exc:
-
-                logger.exception(
-                    "Transient database error. Retrying once."
-                )
-
-                last_error = exc
-
+        try:
+            with get_conn_from_pool() as conn:
                 try:
-                    conn.close()
-                except Exception:
-                    pass
-
-                continue
-
-            except Exception:
-                logger.exception("Database query failed.")
-                raise
+                    return _execute_on_connection(
+                        conn,
+                        query,
+                        params,
+                        fetch,
+                    )
+                except (
+                    psycopg2.InterfaceError,
+                    psycopg2.OperationalError,
+                ) as exc:
+                    logger.exception(
+                        "Transient database error during query execution. Retrying once."
+                    )
+                    last_error = exc
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    continue
+        except (
+            psycopg2.InterfaceError,
+            psycopg2.OperationalError,
+            DatabaseUnavailableError,
+        ) as exc:
+            logger.exception("Transient database error while acquiring connection. Retrying once.")
+            last_error = exc
+            continue
+        except Exception:
+            logger.exception("Database query failed.")
+            raise
 
     if last_error:
         raise last_error

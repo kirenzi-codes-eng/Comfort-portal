@@ -135,20 +135,26 @@ def get_next_loan_due_date(user_id: Optional[str]) -> Optional[date]:
         return None
 
     rows = safe_execute_query(
-        "SELECT approved_date, applied_date FROM loans WHERE member_id = %s AND status IN ('Active','Approved') ORDER BY COALESCE(approved_date, applied_date) DESC LIMIT 1;",
+        "SELECT approved_date, applied_date FROM loans WHERE member_id = %s AND status IN ('Active','Approved');",
         params=(user_id,),
         fetch=True,
         fallback=[],
     ) or []
-    if not rows:
-        return None
+    due_dates = []
+    for row in rows:
+        base_value = row.get("approved_date") or row.get("applied_date")
+        base_datetime = parse_db_datetime(base_value)
+        if base_datetime is not None:
+            due_dates.append(add_months(base_datetime, 1))
 
-    base_value = rows[0].get("approved_date") or rows[0].get("applied_date")
-    base_datetime = parse_db_datetime(base_value)
-    if base_datetime is None:
-        return None
+    if due_dates:
+        return min(due_dates)
 
-    return add_months(base_datetime, 1)
+    if rows:
+        # There is an active or approved loan, but no valid date could be parsed.
+        return datetime.now().date()
+
+    return None
 
 
 def calculate_effective_loan_balance(rows: list[dict]) -> float:
@@ -156,8 +162,11 @@ def calculate_effective_loan_balance(rows: list[dict]) -> float:
     for row in rows:
         outstanding = float(row.get("outstanding_balance") or 0.0)
         interest = float(row.get("interest_accumulated") or 0.0)
-        principal = float(row.get("amount_requested") or 0.0)
-        if principal > 0 and outstanding <= principal:
+        amount_requested = float(row.get("amount_requested") or 0.0)
+
+        # If outstanding balance is still recorded as original principal and interest is tracked separately,
+        # include the separate interest amount. Otherwise, use the outstanding balance directly.
+        if interest > 0 and outstanding == amount_requested:
             total += outstanding + interest
         else:
             total += outstanding
@@ -646,7 +655,12 @@ def home_view():
         arrears_balance = float(metrics.get("arrears", 0) or 0)
         loan_balance = float(metrics.get("loan_balance", 0) or 0)
         next_due_date = get_next_loan_due_date(user_id) if user_id else None
-        next_due_display = next_due_date.strftime("%d %b %Y") if next_due_date else "No active loan"
+        if next_due_date:
+            next_due_display = next_due_date.strftime("%d %b %Y")
+        elif loan_balance > 0:
+            next_due_display = "Active loan pending due date"
+        else:
+            next_due_display = "No active loan"
         projected_share = subscriptions_contributed * 0.08 if subscriptions_contributed > 0 else 0.0
         alert_class = "action-card--alert" if arrears_balance > 0 else ""
 

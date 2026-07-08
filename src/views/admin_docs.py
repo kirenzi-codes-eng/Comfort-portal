@@ -83,29 +83,56 @@ def _rerun_page() -> None:
 
 
 def _render_member_profile_summary(member_record: Optional[Dict]) -> None:
-    """Render a compact summary card for the selected member profile."""
+    """Render a polished member profile summary card for the selected record."""
     if not member_record:
         st.info("No profile details available yet.")
         return
 
-    st.markdown("### Updated Member Profile")
+    full_name = str(member_record.get("full_name") or "Unnamed Member")
+    role = str(member_record.get("role") or "Member")
+    status = str(member_record.get("status") or "Pending")
+    join_date = str(member_record.get("join_date") or "—")
+    email = str(member_record.get("email") or "—")
+    phone = str(member_record.get("phone") or "—")
+    occupation = str(member_record.get("occupation") or "—")
+    employer = str(member_record.get("employer") or "—")
+    national_id = str(member_record.get("national_id") or "—")
+    emergency_name = str(member_record.get("emergency_contact_name") or "—")
+    emergency_phone = str(member_record.get("emergency_contact_phone") or "—")
+
+    initials = "".join(part[0].upper() for part in full_name.split()[:2]) or "M"
+
     st.markdown(
         f"""
-        <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;margin:10px 0 12px;box-shadow:0 6px 16px rgba(15,23,42,0.04);">
-            <div style="font-weight:700;color:#0f172a;margin-bottom:8px;">{escape(str(member_record.get('full_name') or '-'))}</div>
-            <div style="font-size:0.92rem;color:#334155;line-height:1.5;">
-                <div><strong>Email:</strong> {escape(str(member_record.get('email') or '-'))}</div>
-                <div><strong>Phone:</strong> {escape(str(member_record.get('phone') or '-'))}</div>
-                <div><strong>Role:</strong> {escape(str(member_record.get('role') or '-'))}</div>
-                <div><strong>Status:</strong> {escape(str(member_record.get('status') or '-'))}</div>
-                <div><strong>Join Date:</strong> {escape(str(member_record.get('join_date') or '-'))}</div>
-                <div><strong>National ID:</strong> {escape(str(member_record.get('national_id') or '-'))}</div>
-                <div><strong>Emergency Contact:</strong> {escape(str(member_record.get('emergency_contact_name') or '-'))} • {escape(str(member_record.get('emergency_contact_phone') or '-'))}</div>
+        <div class="detail-hero-card">
+            <div class="detail-hero-avatar">{escape(initials)}</div>
+            <div class="detail-hero-copy">
+                <div class="detail-hero-name">{escape(full_name)}</div>
+                <div class="detail-hero-meta">{escape(role)} • {escape(status)}</div>
+                <div class="detail-hero-meta">Joined {escape(join_date)}</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    left_col, right_col = st.columns([1.05, 1.0], gap="medium")
+    with left_col:
+        with st.container(border=True):
+            st.markdown("<div class='section-title'>System & Role Details</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Role</span><div class='attribute-value'>{escape(role)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Status</span><div class='attribute-value'>{escape(status)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Join Date</span><div class='attribute-value'>{escape(join_date)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Email</span><div class='attribute-value'>{escape(email)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Phone</span><div class='attribute-value'>{escape(phone)}</div></div>", unsafe_allow_html=True)
+
+    with right_col:
+        with st.container(border=True):
+            st.markdown("<div class='section-title'>Employment & Identity</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Occupation</span><div class='attribute-value'>{escape(occupation)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Employer</span><div class='attribute-value'>{escape(employer)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>National ID</span><div class='attribute-value'>{escape(national_id)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='attribute-row'><span class='attribute-label'>Emergency Contact</span><div class='attribute-value'>{escape(emergency_name)}<br>{escape(emergency_phone)}</div></div>", unsafe_allow_html=True)
 
 
 def _build_changed_profile_update_payload(original: Optional[Dict], submitted: Dict) -> Dict:
@@ -418,190 +445,269 @@ def update_member_profile(
             pass
 
 
-def admin_docs_view():
+def _inject_admin_docs_css() -> None:
     st.markdown(
         """
-        <div style="background: linear-gradient(135deg, #DDFBE8 0%, #8BE6A6 100%); border: 1px solid #63C97A; border-radius: 16px; padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(99, 201, 122, 0.22); margin-bottom: 10px;">
-          <h1 style="margin: 0; font-size: 1.25rem; color: #14532D;">Member Directory & Document Repository</h1>
-          <p style="margin: 4px 0 0; color: #2F5F3D; font-size: 0.8rem; line-height: 1.5;">Manage members, approvals, and shared documents from a compact admin workspace.</p>
-        </div>
+        <style>
+            .stApp { background: #f8fafc; }
+            .block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 1400px; }
+            .admin-shell { padding: 0.25rem 0 1.25rem; }
+            .page-title { margin: 0 0 0.35rem; font-size: clamp(1.55rem, 2.2vw, 2.15rem); color: #0f172a; font-weight: 800; letter-spacing: -0.02em; }
+            .page-caption { margin: 0 0 1rem; color: #475569; font-size: 0.95rem; line-height: 1.55; }
+            .surface-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 20px; padding: 1rem 1rem 1.1rem; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.04); margin-bottom: 1rem; }
+            .section-title { font-size: 1rem; font-weight: 800; color: #0f172a; margin-bottom: 0.65rem; }
+            .directory-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.9rem 0.8rem; border-radius: 16px; border: 1px solid #e2e8f0; background: #fff; margin-bottom: 0.7rem; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.03); }
+            .directory-row:hover { border-color: #c7d2fe; }
+            .avatar-circle { width: 44px; height: 44px; border-radius: 999px; background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); color: white; font-size: 0.92rem; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+            .member-name { font-weight: 800; color: #0f172a; margin-bottom: 0.2rem; }
+            .member-id { font-size: 0.8rem; color: #64748b; }
+            .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.28rem 0.7rem; font-size: 0.74rem; font-weight: 700; white-space: nowrap; }
+            .pill-role { background: #eef2ff; color: #4338ca; }
+            .pill-active { background: #ecfdf3; color: #047857; }
+            .pill-pending { background: #fef3c7; color: #b45309; }
+            .pill-inactive { background: #fef2f2; color: #b91c1c; }
+            .detail-hero-card { display: flex; align-items: center; gap: 1rem; padding: 1rem; border-radius: 22px; background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.04); margin-bottom: 1rem; }
+            .detail-hero-avatar { width: 64px; height: 64px; border-radius: 18px; background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); color: white; font-size: 1.1rem; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+            .detail-hero-name { font-size: 1.15rem; font-weight: 800; color: #0f172a; margin-bottom: 0.2rem; }
+            .detail-hero-meta { font-size: 0.9rem; color: #475569; }
+            .attribute-row { margin-bottom: 0.6rem; }
+            .attribute-label { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; font-weight: 700; margin-bottom: 0.2rem; }
+            .attribute-value { font-size: 0.95rem; font-weight: 700; color: #0f172a; line-height: 1.45; }
+            .empty-state { text-align: center; padding: 1.3rem 0.6rem; border: 1px dashed #cbd5e1; border-radius: 18px; background: #f8fafc; color: #64748b; }
+            .empty-state-icon { font-size: 2rem; margin-bottom: 0.4rem; }
+            .empty-state-title { font-size: 1rem; font-weight: 800; color: #0f172a; margin-bottom: 0.2rem; }
+            .empty-state-copy { font-size: 0.9rem; color: #64748b; }
+            .stButton > button { border-radius: 999px !important; padding: 0.55rem 0.95rem !important; font-weight: 700; }
+            .stButton > button[kind="primary"] { background: #4f46e5 !important; color: white !important; border: none !important; }
+            @media (max-width: 768px) {
+                .block-container { padding-left: 0.7rem; padding-right: 0.7rem; }
+                .directory-row { flex-direction: column; align-items: flex-start; }
+                .detail-hero-card { flex-direction: column; align-items: flex-start; }
+            }
+        </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_directory_rows(members: List[Dict], selected_member_id: Optional[str]) -> None:
+    if not members:
+        st.markdown(
+            """
+            <div class="empty-state">
+                <div class="empty-state-icon">📁</div>
+                <div class="empty-state-title">No members match the current filters</div>
+                <div class="empty-state-copy">Try adjusting the search terms or role filter.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    for member in members:
+        member_id = str(member.get("member_id") or "")
+        full_name = str(member.get("full_name") or "Unnamed Member")
+        role = str(member.get("role") or "Member")
+        status = str(member.get("status") or "Pending")
+        email = str(member.get("email") or "—")
+        phone = str(member.get("phone") or "—")
+        initials = "".join(part[0].upper() for part in full_name.split()[:2]) or "M"
+
+        status_class = "pill-active" if status.lower() == "active" else "pill-pending" if status.lower() in {"pending", "new"} else "pill-inactive"
+        role_class = "pill-role"
+
+        with st.container(border=True):
+            cols = st.columns([0.7, 2.0, 1.7, 0.9, 0.9, 0.7], gap="small")
+            with cols[0]:
+                st.markdown(f"<div class='avatar-circle'>{escape(initials)}</div>", unsafe_allow_html=True)
+            with cols[1]:
+                st.markdown(f"<div class='member-name'>{escape(full_name)}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='member-id'>{escape(member_id)}</div>", unsafe_allow_html=True)
+            with cols[2]:
+                st.markdown(f"<div class='member-id'>{escape(email)}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='member-id'>{escape(phone)}</div>", unsafe_allow_html=True)
+            with cols[3]:
+                st.markdown(f"<span class='pill {role_class}'>{escape(role)}</span>", unsafe_allow_html=True)
+            with cols[4]:
+                st.markdown(f"<span class='pill {status_class}'>{escape(status)}</span>", unsafe_allow_html=True)
+            with cols[5]:
+                if st.button("View", key=f"view_member_{member_id}", use_container_width=True):
+                    st.session_state["admin_docs_selected_member_id"] = member_id
+                    st.session_state["admin_docs_selected_member_id"] = member_id
+                    st.rerun()
+
+            if selected_member_id and member_id == selected_member_id:
+                st.caption("Selected for profile review")
+
+
+def admin_docs_view():
+    try:
+        st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+    except Exception:
+        pass
+
+    _inject_admin_docs_css()
+    st.markdown("<div class='admin-shell'>", unsafe_allow_html=True)
+    st.markdown("<h1 class='page-title'>Administrative Hub</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='page-caption'>Manage member records, review operational metadata, and access secure document vaults.</p>", unsafe_allow_html=True)
+
     user_role = st.session_state.get("user_role")
     user_name = st.session_state.get("user_name")
 
     allowed_roles = {"Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare"}
     if user_role not in allowed_roles:
         st.info("You do not have access to the admin directory or document repository.")
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     ensure_member_profile_columns()
 
-    # Member Directory
-    st.markdown("### Member Details Directory")
-    with st.spinner("Loading data..."):
+    with st.spinner("Loading directory data..."):
         members = fetch_member_directory()
-    if members:
-        df = pd.DataFrame(members)
-        st.dataframe(
-            df,
-            width="stretch",
-            hide_index=True,
-            column_config={column: {"width": "small"} for column in df.columns},
+
+    search_term = st.text_input("🔍 Search members by name, ID, or email...", key="admin_docs_search", placeholder="Search members")
+    search_col, filter_col = st.columns([1.7, 1.0], gap="small")
+    with search_col:
+        search_value = search_term.strip().lower()
+    with filter_col:
+        filter_value = st.selectbox(
+            "Filter by Role/Status",
+            options=["All", "Active", "Pending", "Inactive", "Full Member", "Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"],
+            key="admin_docs_filter",
         )
-    else:
-        st.info("No members found.")
+
+    filtered_members = []
+    for member in members:
+        member_id = str(member.get("member_id") or "")
+        full_name = str(member.get("full_name") or "")
+        email = str(member.get("email") or "")
+        role = str(member.get("role") or "")
+        status = str(member.get("status") or "")
+        if search_value and not any(search_value in value.lower() for value in [full_name, member_id, email]):
+            continue
+        if filter_value != "All":
+            if filter_value in {"Active", "Pending", "Inactive", "Full Member"} and filter_value.lower() not in status.lower():
+                continue
+            if filter_value in {"Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"} and filter_value.lower() not in role.lower():
+                continue
+        filtered_members.append(member)
+
+    selected_member_id = st.session_state.get("admin_docs_selected_member_id")
+    if selected_member_id not in {str(member.get("member_id") or "") for member in filtered_members}:
+        selected_member_id = str(filtered_members[0].get("member_id") or "") if filtered_members else None
+        st.session_state["admin_docs_selected_member_id"] = selected_member_id
+
+    st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Member Directory</div>", unsafe_allow_html=True)
+    _render_directory_rows(filtered_members, selected_member_id)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if user_role == "Chairperson":
-        st.markdown("---")
-        st.markdown("### Approve New Registrations")
-        pending_members = [row for row in members if str(row.get("status") or "").lower() in {"pending", "new"}]
+        pending_members = [row for row in filtered_members if str(row.get("status") or "").lower() in {"pending", "new"}]
+        st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Pending Registration Queue</div>", unsafe_allow_html=True)
         if pending_members:
             for member in pending_members:
-                with st.container():
-                    st.markdown(
-                        f"""
-                        <div class="card" style="padding: 10px; margin-bottom: 8px;">
-                          <div style="font-weight: 700; color: #0f172a;">{member.get('full_name') or 'Unnamed Member'} ({member.get('member_id')})</div>
-                          <div style="color: #64748b; margin-top: 4px; font-size: 0.78rem;">Email: {member.get('email') or '-'} • Phone: {member.get('phone') or '-'}</div>
-                          <div style="color: #dc3545; margin-top: 4px; font-size: 0.78rem;">Current status: {member.get('status') or 'Pending'}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    if st.button("Approve Registration", key=f"approve_{member['member_id']}"):
-                        approve_new_registration(member["member_id"])
-                        st.toast(f"Approved registration for {member['member_id']}", icon="✅")
-                        st.rerun()
+                member_id = str(member.get("member_id") or "")
+                full_name = str(member.get("full_name") or "Unnamed Member")
+                email = str(member.get("email") or "—")
+                phone = str(member.get("phone") or "—")
+                with st.container(border=True):
+                    cols = st.columns([2.2, 1.0], gap="small")
+                    with cols[0]:
+                        st.markdown(f"**{escape(full_name)}**")
+                        st.caption(f"{escape(email)} • {escape(phone)}")
+                    with cols[1]:
+                        if st.button("Approve", key=f"approve_{member_id}"):
+                            approve_new_registration(member_id)
+                            st.toast(f"Approved registration for {member_id}", icon="✅")
+                            st.rerun()
         else:
-            st.info("No pending registrations to approve right now.")
+            st.markdown(
+                """
+                <div class='empty-state'>
+                    <div class='empty-state-icon'>✅</div>
+                    <div class='empty-state-title'>No pending approvals</div>
+                    <div class='empty-state-copy'>New registrations will appear here once submitted.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("### Update Member Profile")
-        member_map = {f"{row['full_name']} ({row['member_id']})": row for row in members}
-        selected_key = st.selectbox("Select member", options=list(member_map.keys()), key="chairperson_member_profile_select")
-        selected_member = member_map[selected_key]
-        selected_member_detail = fetch_member_record(selected_member["member_id"]) or selected_member
+    if selected_member_id:
+        selected_member_detail = next((member for member in filtered_members if str(member.get("member_id") or "") == selected_member_id), None)
+        if selected_member_detail is None:
+            selected_member_detail = fetch_member_record(selected_member_id) or (members[0] if members else None)
 
-        # Display member avatar if available
-        with st.container():
-            avatar_url = selected_member_detail.get("avatar_url")
-            if avatar_url:
-                st.image(avatar_url, width=100, caption="Member profile photo")
-            else:
-                st.info("No profile photo set for this member.")
+        if selected_member_detail is None:
+            st.error("Unable to load the selected member's profile. Please try again.")
+            return
 
-        member_key = selected_member_detail.get("member_id")
-        edit_flag_key = f"chairperson_edit_mode_{member_key}"
-        if edit_flag_key not in st.session_state:
-            st.session_state[edit_flag_key] = False
+        st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Member Profile Summary</div>", unsafe_allow_html=True)
+        _render_member_profile_summary(selected_member_detail)
+        action_col_a, action_col_b = st.columns([1, 1], gap="small")
+        with action_col_a:
+            if st.button("Edit Member Profile", use_container_width=True, type="primary"):
+                st.session_state["admin_docs_edit_mode"] = True
+                st.rerun()
+        with action_col_b:
+            pdf_bytes = build_member_profile_pdf(selected_member_detail)
+            st.download_button(
+                label="Download Member Profile PDF",
+                data=pdf_bytes,
+                file_name=f"member_{selected_member_detail.get('member_id', 'profile')}.pdf" if selected_member_detail else "member_profile.pdf",
+                mime="application/pdf",
+                key="admin_docs_download_pdf",
+                use_container_width=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        # If not editing, show a read-only summary and an Edit button
-        if not st.session_state[edit_flag_key]:
-            st.markdown("**Member Summary**")
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.markdown(f"**Full name:** {escape(str(selected_member_detail.get('full_name') or '-'))}")
-                st.markdown(f"**Email:** {escape(str(selected_member_detail.get('email') or '-'))}")
-                st.markdown(f"**Phone:** {escape(str(selected_member_detail.get('phone') or '-'))}")
-                st.markdown(f"**Role:** {escape(str(selected_member_detail.get('role') or '-'))}")
-                st.markdown(f"**Status:** {escape(str(selected_member_detail.get('status') or '-'))}")
-                st.markdown(f"**Join date:** {escape(str(selected_member_detail.get('join_date') or '-'))}")
-            with c2:
-                st.markdown(f"**Occupation:** {escape(str(selected_member_detail.get('occupation') or '-'))}")
-                st.markdown(f"**Employer:** {escape(str(selected_member_detail.get('employer') or '-'))}")
-                st.markdown(f"**National ID:** {escape(str(selected_member_detail.get('national_id') or '-'))}")
-                st.markdown(f"**Emergency Contact:** {escape(str(selected_member_detail.get('next_of_kin_name') or '-'))} — {escape(str(selected_member_detail.get('next_of_kin_phone') or '-'))}")
-                st.markdown(f"**Notes:** {escape(str(selected_member_detail.get('notes') or '-'))}")
-
-            if user_role in {"Chairperson", "Secretary"}:
-                pdf_bytes = build_member_profile_pdf(selected_member_detail)
-                st.download_button(
-                    label="Download Member Profile PDF",
-                    data=pdf_bytes,
-                    file_name=f"member_{selected_member_detail.get('member_id', 'profile')}.pdf",
-                    mime="application/pdf",
-                    key=f"pdf_{member_key}",
-                )
-
-            if st.button("Edit Member Profile", key=f"edit_toggle_{member_key}"):
-                st.session_state[edit_flag_key] = True
-                _rerun_page()
-
-        else:
-            # Existing full-edit form (chairperson)
+        edit_mode = st.session_state.get("admin_docs_edit_mode", False)
+        if edit_mode and user_role == "Chairperson":
+            st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
+            st.markdown("<div class='section-title'>Edit Member Profile</div>", unsafe_allow_html=True)
+            selected_member_detail = fetch_member_record(selected_member_id) or selected_member_detail
             with st.form("chairperson_member_profile_form"):
-                col1, col2 = st.columns(2)
-                with col1:
+                col_a, col_b = st.columns(2, gap="medium")
+                with col_a:
                     full_name = st.text_input("Full name", value=str(selected_member_detail.get("full_name") or ""), key="chairperson_full_name")
                     email = st.text_input("Email", value=str(selected_member_detail.get("email") or ""), key="chairperson_email")
                     phone = st.text_input("Phone", value=str(selected_member_detail.get("phone") or ""), key="chairperson_phone")
                     safe_dob = _normalize_join_date(selected_member_detail.get("date_of_birth"))
                     if not safe_dob or safe_dob.year < 1900 or safe_dob.year > date.today().year:
                         safe_dob = date(2000, 1, 1)
-                    date_of_birth_value = st.date_input(
-                        "Date of birth",
-                        value=safe_dob,
-                        min_value=date(1900, 1, 1),
-                        max_value=date(date.today().year, 12, 31),
-                        key="chairperson_date_of_birth",
-                    )
+                    date_of_birth_value = st.date_input("Date of birth", value=safe_dob, min_value=date(1900, 1, 1), max_value=date(date.today().year, 12, 31), key="chairperson_date_of_birth")
                     gender = st.text_input("Gender", value=str(selected_member_detail.get("gender") or ""), key="chairperson_gender")
                     address = st.text_input("Address", value=str(selected_member_detail.get("address") or ""), key="chairperson_address")
                     city = st.text_input("City", value=str(selected_member_detail.get("city") or ""), key="chairperson_city")
                     country = st.text_input("Country", value=str(selected_member_detail.get("country") or ""), key="chairperson_country")
                     nationality = st.text_input("Nationality", value=str(selected_member_detail.get("nationality") or ""), key="chairperson_nationality")
-
-                with col2:
+                with col_b:
                     role_options = ["Member", "Secretary", "Treasurer", "Chairperson", "Vice Chairperson", "Welfare"]
                     selected_role = str(selected_member_detail.get("role") or "")
-                    new_role = st.selectbox(
-                        "Role",
-                        options=role_options,
-                        index=role_options.index(selected_role) if selected_role in role_options else 0,
-                        key="chairperson_role",
-                    )
+                    new_role = st.selectbox("Role", options=role_options, index=role_options.index(selected_role) if selected_role in role_options else 0, key="chairperson_role")
                     status_options = ["Active", "Inactive", "Pending", "Full Member"]
                     selected_status = str(selected_member_detail.get("status") or "")
-                    new_status = st.selectbox(
-                        "Status",
-                        options=status_options,
-                        index=status_options.index(selected_status) if selected_status in status_options else 0,
-                        key="chairperson_status",
-                    )
+                    new_status = st.selectbox("Status", options=status_options, index=status_options.index(selected_status) if selected_status in status_options else 0, key="chairperson_status")
                     safe_join_date = _normalize_join_date(selected_member_detail.get("join_date"))
                     if not safe_join_date or safe_join_date.year < 1900 or safe_join_date.year > date.today().year:
                         safe_join_date = date(2000, 1, 1)
-                    join_date_value = st.date_input(
-                        "Join date",
-                        value=safe_join_date,
-                        min_value=date(1900, 1, 1),
-                        max_value=date(date.today().year, 12, 31),
-                        key="chairperson_join_date",
-                    )
+                    join_date_value = st.date_input("Join date", value=safe_join_date, min_value=date(1900, 1, 1), max_value=date(date.today().year, 12, 31), key="chairperson_join_date")
                     occupation = st.text_input("Occupation", value=str(selected_member_detail.get("occupation") or ""), key="chairperson_occupation")
                     employer = st.text_input("Employer", value=str(selected_member_detail.get("employer") or ""), key="chairperson_employer")
                     national_id = st.text_input("National ID", value=str(selected_member_detail.get("national_id") or ""), key="chairperson_national_id")
                     notes = st.text_area("Admin notes", value=str(selected_member_detail.get("notes") or ""), key="chairperson_notes")
-
                 st.markdown("---")
-                st.markdown("**Emergency Contact**")
+                st.markdown("<div class='section-title'>Emergency Contact</div>", unsafe_allow_html=True)
                 next_of_kin_name = st.text_input("Next of kin name", value=str(selected_member_detail.get("next_of_kin_name") or ""), key="chairperson_next_of_kin_name")
                 next_of_kin_relationship = st.text_input("Next of kin relationship", value=str(selected_member_detail.get("next_of_kin_relationship") or ""), key="chairperson_next_of_kin_relationship")
                 next_of_kin_phone = st.text_input("Next of kin phone", value=str(selected_member_detail.get("next_of_kin_phone") or ""), key="chairperson_next_of_kin_phone")
                 emergency_contact_name = st.text_input("Emergency contact name", value=str(selected_member_detail.get("emergency_contact_name") or ""), key="chairperson_emergency_contact_name")
                 emergency_contact_phone = st.text_input("Emergency contact phone", value=str(selected_member_detail.get("emergency_contact_phone") or ""), key="chairperson_emergency_contact_phone")
 
-                btn_col_a, btn_col_b = st.columns([1, 1])
-                with btn_col_a:
-                    save_clicked = st.form_submit_button("Save Member Profile")
-
-            cancel_clicked = st.button("Cancel Edit", key=f"cancel_edit_{member_key}")
-
-            if cancel_clicked:
-                st.session_state[edit_flag_key] = False
-                _rerun_page()
+                save_clicked = st.form_submit_button("Save Member Profile")
 
             if save_clicked:
                 submitted_values = {
@@ -628,7 +734,6 @@ def admin_docs_view():
                     "emergency_contact_phone": (emergency_contact_phone or "").strip() or None,
                 }
                 changed_values = _build_changed_profile_update_payload(selected_member_detail, submitted_values)
-
                 update_member_profile(
                     selected_member_detail["member_id"],
                     changed_values.get("full_name"),
@@ -653,20 +758,19 @@ def admin_docs_view():
                     changed_values.get("emergency_contact_name"),
                     changed_values.get("emergency_contact_phone"),
                 )
-                st.session_state[edit_flag_key] = False
+                st.session_state["admin_docs_edit_mode"] = False
                 st.success("Member profile updated successfully.")
-                updated_member = fetch_member_record(selected_member_detail["member_id"])
-                _render_member_profile_summary(updated_member)
-                _rerun_page()
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown("### Document Repository")
-
+    st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Document Repository</div>", unsafe_allow_html=True)
+    st.caption("Secure vault for operational records, meeting minutes, and member files.")
     if user_role == "Secretary":
-        uploaded_file = st.file_uploader("Upload meeting minutes or documents", type=None)
+        uploaded_file = st.file_uploader("Upload a document", type=None, accept_multiple_files=False)
         if uploaded_file is not None:
-            title = st.text_input("Document Title", value=uploaded_file.name)
-            if st.button("Upload Document"):
+            title = st.text_input("Document title", value=uploaded_file.name)
+            if st.button("Upload Document", use_container_width=True):
                 title_text = (title or "").strip()
                 if not title_text:
                     st.toast("Please provide a title for the document.", icon="⚠️")
@@ -677,36 +781,40 @@ def admin_docs_view():
                         f.write(uploaded_file.getbuffer())
                     save_document_record(title_text, save_path, user_name or "Secretary")
                     st.toast("Document uploaded successfully.", icon="✅")
+                    st.rerun()
 
     documents = fetch_documents()
     if documents:
         for doc in documents:
-            title = doc.get("title") or "Untitled"
-            file_url = doc.get("file_url") or ""
+            title = str(doc.get("title") or "Untitled")
+            file_url = str(doc.get("file_url") or "")
             uploaded_at = doc.get("uploaded_at")
             uploaded_at_str = uploaded_at.strftime("%Y-%m-%d %H:%M") if uploaded_at is not None and hasattr(uploaded_at, "strftime") else str(uploaded_at or "-")
-            if os.path.exists(file_url):
-                with st.container():
-                    st.markdown(
-                        f"""
-                        <div class="card" style="padding: 10px; margin-bottom: 8px;">
-                          <div style="font-weight: 700; color: #0f172a;">{title}</div>
-                          <div style="color: #64748b; margin-top: 4px; font-size: 0.78rem;">Uploaded at: {uploaded_at_str}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    with open(file_url, "rb") as handle:
-                        st.download_button(
-                            label="Download",
-                            data=handle.read(),
-                            file_name=os.path.basename(file_url),
-                            mime="application/octet-stream",
-                        )
-            else:
-                st.markdown(f"- [{title}]({file_url}) — {uploaded_at_str}")
+            with st.container(border=True):
+                col_a, col_b = st.columns([2.2, 1.0], gap="small")
+                with col_a:
+                    st.markdown(f"**{escape(title)}**")
+                    st.caption(f"Uploaded {escape(uploaded_at_str)}")
+                with col_b:
+                    if os.path.exists(file_url):
+                        with open(file_url, "rb") as handle:
+                            st.download_button("Download", data=handle.read(), file_name=os.path.basename(file_url), mime="application/octet-stream", use_container_width=True)
+                    else:
+                        st.info("Unavailable")
     else:
-        st.info("No documents have been uploaded yet.")
+        st.markdown(
+            """
+            <div class='empty-state'>
+                <div class='empty-state-icon'>🗂️</div>
+                <div class='empty-state-title'>No Documents Uploaded</div>
+                <div class='empty-state-copy'>Upload a file to begin building the operational repository.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
