@@ -4,7 +4,8 @@ from datetime import datetime, date, timedelta
 from html import escape
 from typing import List, Tuple
 
-from src.database.connection import execute_query
+from app import coerce_date_input_value
+from src.database.connection import cached_read_query, execute_query
 from src.utils.membership import get_membership_status_for_db
 from src.utils.balances import get_effective_member_balance
 from src.utils.timezone import today_in_uganda
@@ -397,7 +398,7 @@ def member_view(member_id: str) -> None:
             )
 
         st.subheader("Payment History")
-        st.dataframe(pd.DataFrame(history_rows), width="stretch")
+        st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
 
     st.markdown("---")
     st.subheader("Monthly Ledger")
@@ -435,7 +436,7 @@ def fetch_all_members() -> List[Tuple[str, str]]:
 
 @st.cache_data(ttl=300)
 def fetch_all_members_cached() -> List[Tuple[str, str]]:
-    rows = execute_query("SELECT member_id, full_name FROM members ORDER BY full_name;", params=None, fetch=True)
+    rows = cached_read_query("SELECT member_id, full_name FROM members ORDER BY full_name;", params=None)
     if not rows:
         return []
     return [(r["member_id"], r["full_name"]) for r in rows]
@@ -486,7 +487,12 @@ def treasurer_view(user_role: str):
                 st.markdown("<div class='form-panel-title'>Post Subscription Payment</div>", unsafe_allow_html=True)
                 with st.form("post_payment_form"):
                     selected = st.selectbox("Member", options=list(member_options.keys()))
-                    billing_month = st.date_input("Billing Month", value=today_in_uganda())
+                    billing_month = st.date_input(
+                        "Billing Month",
+                        value=coerce_date_input_value(today_in_uganda(), date(2000, 1, 1), date(date.today().year, 12, 31)),
+                        min_value=date(2000, 1, 1),
+                        max_value=date(date.today().year, 12, 31),
+                    )
                     amount = st.number_input("Amount Paid (UGX)", min_value=0.0, value=20000.0, step=100.0)
                     submit_payment = st.form_submit_button("Post Payment")
 
@@ -583,7 +589,7 @@ def treasurer_view(user_role: str):
                 for row in recent
             ]
         )
-        st.dataframe(recent_df, width="stretch")
+        st.dataframe(recent_df, width="stretch", hide_index=True)
     else:
         st.info("No posted subscription payments in the last 30 days.")
 

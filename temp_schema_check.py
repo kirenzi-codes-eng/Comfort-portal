@@ -17,5 +17,6 @@ cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE
 for row in cur.fetchall():
     print(row)
 cur.execute('SELECT COUNT(*) FROM members;')
-print('COUNT', cur.fetchone()[0])
+count_row = cur.fetchone()
+print('COUNT', count_row["count"] if isinstance(count_row, dict) else count_row[0])
 conn.close()

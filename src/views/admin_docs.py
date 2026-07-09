@@ -13,6 +13,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 
+from app import coerce_date_input_value
 from src.database.connection import execute_query
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
@@ -21,6 +22,39 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 def ensure_member_profile_columns() -> None:
     try:
+        execute_query(
+            """
+            CREATE TABLE IF NOT EXISTS members (
+                id SERIAL PRIMARY KEY,
+                member_id TEXT UNIQUE,
+                full_name TEXT,
+                email TEXT UNIQUE,
+                phone TEXT,
+                password_hash TEXT,
+                role TEXT,
+                status TEXT,
+                join_date DATE,
+                notes TEXT,
+                avatar_url TEXT,
+                date_of_birth DATE,
+                gender TEXT,
+                address TEXT,
+                city TEXT,
+                country TEXT,
+                nationality TEXT,
+                occupation TEXT,
+                employer TEXT,
+                national_id TEXT,
+                next_of_kin_name TEXT,
+                next_of_kin_relationship TEXT,
+                next_of_kin_phone TEXT,
+                emergency_contact_name TEXT,
+                emergency_contact_phone TEXT
+            );
+            """,
+            params=None,
+            fetch=False,
+        )
         execute_query(
             """
             ALTER TABLE members
@@ -531,7 +565,7 @@ def _render_directory_rows(members: List[Dict], selected_member_id: Optional[str
             with cols[4]:
                 st.markdown(f"<span class='pill {status_class}'>{escape(status)}</span>", unsafe_allow_html=True)
             with cols[5]:
-                if st.button("View", key=f"view_member_{member_id}", use_container_width=True):
+                if st.button("View", key=f"view_member_{member_id}", width="stretch"):
                     st.session_state["admin_docs_selected_member_id"] = member_id
                     st.session_state["admin_docs_selected_member_id"] = member_id
                     st.rerun()
@@ -649,7 +683,7 @@ def admin_docs_view():
         _render_member_profile_summary(selected_member_detail)
         action_col_a, action_col_b = st.columns([1, 1], gap="small")
         with action_col_a:
-            if st.button("Edit Member Profile", use_container_width=True, type="primary"):
+            if st.button("Edit Member Profile", width="stretch", type="primary"):
                 st.session_state["admin_docs_edit_mode"] = True
                 st.rerun()
         with action_col_b:
@@ -660,7 +694,7 @@ def admin_docs_view():
                 file_name=f"member_{selected_member_detail.get('member_id', 'profile')}.pdf" if selected_member_detail else "member_profile.pdf",
                 mime="application/pdf",
                 key="admin_docs_download_pdf",
-                use_container_width=True,
+                width="stretch",
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -676,8 +710,7 @@ def admin_docs_view():
                     email = st.text_input("Email", value=str(selected_member_detail.get("email") or ""), key="chairperson_email")
                     phone = st.text_input("Phone", value=str(selected_member_detail.get("phone") or ""), key="chairperson_phone")
                     safe_dob = _normalize_join_date(selected_member_detail.get("date_of_birth"))
-                    if not safe_dob or safe_dob.year < 1900 or safe_dob.year > date.today().year:
-                        safe_dob = date(2000, 1, 1)
+                    safe_dob = coerce_date_input_value(safe_dob, date(1900, 1, 1), date(date.today().year, 12, 31))
                     date_of_birth_value = st.date_input("Date of birth", value=safe_dob, min_value=date(1900, 1, 1), max_value=date(date.today().year, 12, 31), key="chairperson_date_of_birth")
                     gender = st.text_input("Gender", value=str(selected_member_detail.get("gender") or ""), key="chairperson_gender")
                     address = st.text_input("Address", value=str(selected_member_detail.get("address") or ""), key="chairperson_address")
@@ -692,8 +725,7 @@ def admin_docs_view():
                     selected_status = str(selected_member_detail.get("status") or "")
                     new_status = st.selectbox("Status", options=status_options, index=status_options.index(selected_status) if selected_status in status_options else 0, key="chairperson_status")
                     safe_join_date = _normalize_join_date(selected_member_detail.get("join_date"))
-                    if not safe_join_date or safe_join_date.year < 1900 or safe_join_date.year > date.today().year:
-                        safe_join_date = date(2000, 1, 1)
+                    safe_join_date = coerce_date_input_value(safe_join_date, date(1900, 1, 1), date(date.today().year, 12, 31))
                     join_date_value = st.date_input("Join date", value=safe_join_date, min_value=date(1900, 1, 1), max_value=date(date.today().year, 12, 31), key="chairperson_join_date")
                     occupation = st.text_input("Occupation", value=str(selected_member_detail.get("occupation") or ""), key="chairperson_occupation")
                     employer = st.text_input("Employer", value=str(selected_member_detail.get("employer") or ""), key="chairperson_employer")
@@ -770,7 +802,7 @@ def admin_docs_view():
         uploaded_file = st.file_uploader("Upload a document", type=None, accept_multiple_files=False)
         if uploaded_file is not None:
             title = st.text_input("Document title", value=uploaded_file.name)
-            if st.button("Upload Document", use_container_width=True):
+            if st.button("Upload Document", width="stretch"):
                 title_text = (title or "").strip()
                 if not title_text:
                     st.toast("Please provide a title for the document.", icon="⚠️")
@@ -798,7 +830,7 @@ def admin_docs_view():
                 with col_b:
                     if os.path.exists(file_url):
                         with open(file_url, "rb") as handle:
-                            st.download_button("Download", data=handle.read(), file_name=os.path.basename(file_url), mime="application/octet-stream", use_container_width=True)
+                            st.download_button("Download", data=handle.read(), file_name=os.path.basename(file_url), mime="application/octet-stream", width="stretch")
                     else:
                         st.info("Unavailable")
     else:

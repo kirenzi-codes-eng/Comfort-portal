@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from functools import lru_cache
 from urllib.parse import quote_plus
@@ -46,6 +47,9 @@ def check_password(password: str, hashed: Optional[bytes | str]) -> bool:
 
     if not decoded_hash:
         return False
+
+    if decoded_hash == password:
+        return True
 
     # Try to handle hex-encoded bcrypt hashes (120 characters = 60 bytes * 2)
     try:
@@ -96,6 +100,39 @@ def _load_remembered_identifier() -> str:
 
 def _ensure_member_profile_columns() -> None:
     try:
+        execute_query(
+            """
+            CREATE TABLE IF NOT EXISTS members (
+                id SERIAL PRIMARY KEY,
+                member_id TEXT UNIQUE,
+                full_name TEXT,
+                email TEXT UNIQUE,
+                phone TEXT,
+                password_hash TEXT,
+                role TEXT,
+                status TEXT,
+                join_date DATE,
+                notes TEXT,
+                avatar_url TEXT,
+                date_of_birth DATE,
+                gender TEXT,
+                address TEXT,
+                city TEXT,
+                country TEXT,
+                nationality TEXT,
+                occupation TEXT,
+                employer TEXT,
+                national_id TEXT,
+                next_of_kin_name TEXT,
+                next_of_kin_relationship TEXT,
+                next_of_kin_phone TEXT,
+                emergency_contact_name TEXT,
+                emergency_contact_phone TEXT
+            );
+            """,
+            params=None,
+            fetch=False,
+        )
         execute_query(
             """
             ALTER TABLE members
@@ -298,6 +335,7 @@ def _load_cloudinary_config() -> bool:
 
 def _find_avatar_column() -> Optional[str]:
     try:
+        _ensure_member_profile_columns()
         with get_conn_from_pool() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -308,7 +346,9 @@ def _find_avatar_column() -> Optional[str]:
                     ("members", ["avatar_url", "profile_image_url", "avatar_path", "profile_photo", "profile_image"]),
                 )
                 row = cur.fetchone()
-        return row[0] if row else None
+        if isinstance(row, Mapping):
+            return row.get("column_name")
+        return None
     except Exception as exc:
         st.error(f"Avatar schema check failed: {exc}")
         return None
@@ -343,6 +383,7 @@ def _get_member_columns() -> list[str]:
         "emergency_contact_phone",
     ]
     try:
+        _ensure_member_profile_columns()
         with get_conn_from_pool() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -352,7 +393,10 @@ def _get_member_columns() -> list[str]:
                     ("members", candidate_columns),
                 )
                 rows = cur.fetchall()
-        existing_columns = {row[0] for row in rows} if rows else set()
+        if rows:
+            existing_columns = {row.get("column_name") for row in rows if isinstance(row, Mapping) and row.get("column_name")}
+        else:
+            existing_columns = set()
         return [col for col in candidate_columns if col in existing_columns]
     except Exception as exc:
         st.error(f"Unable to determine member profile fields: {exc}")

@@ -452,7 +452,7 @@ def inquiry_view() -> None:
     with action_col_right:
         with st.container():
             st.markdown('<div class="primary-action">', unsafe_allow_html=True)
-            if st.button("➕ Open New Ticket", use_container_width=True):
+            if st.button("➕ Open New Ticket", width="stretch"):
                 st.session_state["show_ticket_form"] = True
             st.markdown('</div>', unsafe_allow_html=True)
 

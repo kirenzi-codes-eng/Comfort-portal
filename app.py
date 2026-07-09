@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import logging
 import os
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 import streamlit as st
@@ -101,6 +102,47 @@ try:
 except Exception:
     # If Streamlit has already been configured elsewhere, ignore to avoid crash.
     pass
+
+def coerce_date_input_value(value: date | None, min_value: date | None = None, max_value: date | None = None) -> date:
+    """Return a date that always stays within the allowed range for Streamlit date inputs."""
+
+    resolved_min = min_value or date(1900, 1, 1)
+    resolved_max = max_value or date(date.today().year, 12, 31)
+    if resolved_min > resolved_max:
+        resolved_min, resolved_max = resolved_max, resolved_min
+
+    if isinstance(value, datetime):
+        candidate = value.date()
+    else:
+        candidate = value
+
+    if candidate is None:
+        return date(2000, 1, 1)
+
+    if resolved_min <= candidate <= resolved_max:
+        return candidate
+
+    if resolved_min <= date.today() <= resolved_max:
+        return date.today()
+
+    return date(2000, 1, 1)
+
+
+def render_stretched_data_frame(data: Any) -> None:
+    """Render a dataframe with Streamlit's current stretch-friendly settings."""
+
+    st.dataframe(data, width="stretch", hide_index=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_query_example(query: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
+    """Example of a cached read-only query helper using Streamlit's cache."""
+
+    from src.database.connection import execute_query
+
+    rows = execute_query(query, params=params, fetch=True)
+    return rows or []
+
 
 MODULE_CONFIG = {
     "Core Services": [

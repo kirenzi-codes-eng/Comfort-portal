@@ -3,17 +3,16 @@ import pandas as pd
 from datetime import datetime
 from typing import List, Tuple
 
-from src.database.connection import execute_query
+from src.database.connection import cached_read_query, execute_query
 from src.utils.balances import get_effective_pool_balance
 
 
 @st.cache_data(ttl=300)
 def fetch_portfolio_metrics() -> dict:
     total_paid = get_effective_pool_balance()
-    rows = execute_query(
+    rows = cached_read_query(
         "SELECT COUNT(DISTINCT member_id) AS member_count FROM subscriptions;",
         params=None,
-        fetch=True,
     )
     member_count = int(rows[0].get("member_count") or 0) if rows else 0
     return {"total_paid": total_paid, "member_count": member_count}
@@ -21,10 +20,9 @@ def fetch_portfolio_metrics() -> dict:
 
 @st.cache_data(ttl=300)
 def fetch_member_dropdown_options() -> List[Tuple[str, str]]:
-    rows = execute_query(
+    rows = cached_read_query(
         "SELECT member_id, full_name FROM members ORDER BY full_name;",
         params=None,
-        fetch=True,
     )
     if not rows:
         return []
@@ -37,7 +35,7 @@ def fetch_subscription_ledger(limit: int = 20, expected_per_month: int = 20000, 
         months_elapsed = datetime.today().month
     # Aggregate member payment totals and withdrawals in a single query to avoid
     # N+1 queries when computing per-member balances.
-    rows = execute_query(
+    rows = cached_read_query(
         """
         WITH paid_months AS (
             SELECT member_id, COUNT(DISTINCT billing_month) AS paid_months
@@ -66,7 +64,6 @@ def fetch_subscription_ledger(limit: int = 20, expected_per_month: int = 20000, 
         LIMIT %s;
         """,
         params=(limit,),
-        fetch=True,
     )
     if not rows:
         return pd.DataFrame(

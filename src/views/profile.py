@@ -3,6 +3,7 @@ import zoneinfo
 from html import escape
 from datetime import date, datetime
 
+from app import coerce_date_input_value
 from src.components.auth import find_member_by_identifier, get_avatar, update_member_avatar, update_member_password
 from src.views.admin_docs import ensure_member_profile_columns, update_member_profile
 
@@ -201,7 +202,7 @@ def profile_view() -> None:
                 )
 
             if is_regular_member and not edit_mode:
-                if st.button("Edit Profile Details", key="profile_edit_toggle", use_container_width=True):
+                if st.button("Edit Profile Details", key="profile_edit_toggle", width="stretch"):
                     st.session_state["profile_edit_mode"] = True
                     st.rerun()
             else:
@@ -211,8 +212,8 @@ def profile_view() -> None:
                         full_name = st.text_input("Full Name", value=str(member.get("full_name") or ""), key="profile_full_name")
                         email = st.text_input("Email", value=str(member.get("email") or ""), key="profile_email")
                         phone = st.text_input("Phone", value=str(member.get("phone") or ""), key="profile_phone")
-                        safe_date = date_of_birth if date_of_birth and date(1962, 1, 1) <= date_of_birth <= date(2016, 12, 31) else date(2000, 1, 1)
-                        date_of_birth_value = st.date_input("Date of Birth", value=safe_date, min_value=date(1962, 1, 1), max_value=date(2026, 12, 31), key="profile_date_of_birth")
+                        safe_date = coerce_date_input_value(date_of_birth, date(1962, 1, 1), date(date.today().year, 12, 31))
+                        date_of_birth_value = st.date_input("Date of Birth", value=safe_date, min_value=date(1962, 1, 1), max_value=date(date.today().year, 12, 31), key="profile_date_of_birth")
                         gender = st.selectbox("Gender", ["Male", "Female", "Other", "Prefer not to say"], index=["Male", "Female", "Other", "Prefer not to say"].index(str(member.get("gender") or "Prefer not to say")) if str(member.get("gender") or "") in ["Male", "Female", "Other"] else 3, key="profile_gender")
                         nationality = st.text_input("Nationality", value=str(member.get("nationality") or ""), key="profile_nationality")
                         address = st.text_input("Address", value=str(member.get("address") or ""), key="profile_address")
@@ -317,7 +318,7 @@ def profile_view() -> None:
             uploaded_photo = st.file_uploader("Upload passport/profile photo (JPEG/PNG)", type=["jpg", "png", "jpeg"])
             if uploaded_photo:
                 st.image(uploaded_photo, caption="Uploaded Preview", width=200)
-                if st.button("Save Profile Image", use_container_width=True):
+                if st.button("Save Profile Image", width="stretch"):
                     success, message, saved_path = update_member_avatar(user_id, uploaded_photo)
                     if success:
                         st.success(message)
