@@ -59,9 +59,7 @@ def _is_table_missing_error(exc: Exception) -> bool:
 def safe_execute_query(query: str, params=None, fetch: bool = False, fallback=None):
     try:
         rows = execute_query(query, params=params, fetch=fetch)
-        if rows is None:
-            return fallback
-        return rows if rows else fallback
+        return fallback if rows is None else rows
     except psycopg2.Error as exc:
         if _is_table_missing_error(exc):
             logger.warning("Missing table detected in query, using fallback data: %s", query)
@@ -232,12 +230,14 @@ def calculate_member_status(join_date, saving_balance, arrears_balance):
     db_status = get_membership_status_for_db(join_date, saving_balance=saving_balance, arrears_balance=arrears_balance)
 
     label_map = {
-        "Pending": ("Probationary", "#D97706"),
-        "Active": ("Partial", "#2563EB"),
+        "Pending": ("Pending", "#F59E0B"),
+        "Probationary": ("Probationary", "#D97706"),
+        "Active": ("Active", "#2563EB"),
+        "Partial Member": ("Partial", "#2563EB"),
         "Full Member": ("Full", "#059669"),
-        "Inactive": ("Partial", "#2563EB"),
+        "Inactive": ("Inactive", "#EF4444"),
     }
-    membership_label, membership_color = label_map.get(db_status, ("Probationary", "#D97706"))
+    membership_label, membership_color = label_map.get(db_status, ("Pending", "#F59E0B"))
 
     arrears_balance = float(arrears_balance or 0)
     activity_label = "Inactive" if arrears_balance >= 40000 else "Active"
@@ -248,6 +248,53 @@ def calculate_member_status(join_date, saving_balance, arrears_balance):
 
 def format_currency(value) -> str:
     return f"UGX {float(value or 0):,.0f}"
+
+
+def get_member_summary_stats() -> dict:
+    rows = safe_execute_query(
+        "SELECT COUNT(*) AS total_members, "
+        "SUM(CASE WHEN status IN ('Active','Probationary','Partial Member','Full Member') THEN 1 ELSE 0 END) AS active_members, "
+        "SUM(CASE WHEN status = 'Inactive' THEN 1 ELSE 0 END) AS inactive_members, "
+        "SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending_members "
+        "FROM members;",
+        params=None,
+        fetch=True,
+        fallback=[
+            {
+                "total_members": 0,
+                "active_members": 0,
+                "inactive_members": 0,
+                "pending_members": 0,
+            }
+        ],
+    ) or [
+        {
+            "total_members": 0,
+            "active_members": 0,
+            "inactive_members": 0,
+            "pending_members": 0,
+        }
+    ]
+
+    stats = rows[0]
+    total_members = int(stats.get("total_members") or 0)
+    active_members = int(stats.get("active_members") or 0)
+    inactive_members = int(stats.get("inactive_members") or 0)
+    pending_members = int(stats.get("pending_members") or 0)
+
+    if inactive_members > 0:
+        required_action = f"Review {inactive_members} inactive member{'s' if inactive_members != 1 else ''}."
+    elif pending_members > 0:
+        required_action = f"Process {pending_members} pending member{'s' if pending_members != 1 else ''}."
+    else:
+        required_action = "No immediate membership actions pending."
+
+    return {
+        "total_members": total_members,
+        "active_members": active_members,
+        "inactive_members": inactive_members,
+        "required_action": required_action,
+    }
 
 
 def get_member_join_date(member_id: Optional[str]):
@@ -663,6 +710,7 @@ def home_view():
             next_due_display = "No active loan"
         projected_share = subscriptions_contributed * 0.08 if subscriptions_contributed > 0 else 0.0
         alert_class = "action-card--alert" if arrears_balance > 0 else ""
+        summary_stats = get_member_summary_stats() if user_role in allowed_roles else None
 
         st.markdown(
             f"""
@@ -775,6 +823,38 @@ def home_view():
             .action-card--alert .action-title {{
                 color: #b91c1c;
             }}
+            .summary-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                gap: 12px;
+                margin-top: 20px;
+            }}
+            .summary-card {{
+                background: #ffffff;
+                border: 1px solid #dbeafe;
+                border-radius: 16px;
+                padding: 14px 16px;
+                box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+            }}
+            .summary-card-title {{
+                font-size: 0.78rem;
+                font-weight: 700;
+                color: #475569;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                margin-bottom: 8px;
+            }}
+            .summary-card-value {{
+                font-size: 1.45rem;
+                font-weight: 700;
+                color: #0f172a;
+            }}
+            .summary-card-action {{
+                margin-top: 10px;
+                font-size: 0.9rem;
+                color: #334155;
+                line-height: 1.5;
+            }}
             </style>
             <div class="action-grid">
               <div class="action-card action-card--subscriptions {alert_class}">
@@ -802,8 +882,7 @@ def home_view():
                   </div>
                 </div>
               </div>
-            </div>
-            """,
+            </div>            {f"<div class='summary-grid'>\n              <div class='summary-card'>\n                <div class='summary-card-title'>Total members</div>\n                <div class='summary-card-value'>{summary_stats['total_members']}</div>\n              </div>\n              <div class='summary-card'>\n                <div class='summary-card-title'>Active members</div>\n                <div class='summary-card-value'>{summary_stats['active_members']}</div>\n              </div>\n              <div class='summary-card'>\n                <div class='summary-card-title'>Inactive members</div>\n                <div class='summary-card-value'>{summary_stats['inactive_members']}</div>\n              </div>\n              <div class='summary-card'>\n                <div class='summary-card-title'>Required action</div>\n                <div class='summary-card-action'>{escape(summary_stats['required_action'])}</div>\n              </div>\n            </div>" if summary_stats else ""}            """,
             unsafe_allow_html=True,
         )
 

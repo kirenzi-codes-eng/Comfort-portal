@@ -401,8 +401,8 @@ def build_member_profile_pdf(member_record: Optional[Dict]) -> bytes:
 
 def approve_new_registration(member_id: str) -> None:
     execute_query(
-        "UPDATE members SET status = %s, role = %s WHERE member_id = %s;",
-        params=("Active", "Member", member_id),
+        "UPDATE members SET status = %s, role = %s, join_date = COALESCE(join_date, CURRENT_DATE) WHERE member_id = %s;",
+        params=("Probationary", "Member", member_id),
         fetch=False,
     )
     try:
@@ -547,7 +547,12 @@ def _render_directory_rows(members: List[Dict], selected_member_id: Optional[str
         phone = str(member.get("phone") or "—")
         initials = "".join(part[0].upper() for part in full_name.split()[:2]) or "M"
 
-        status_class = "pill-active" if status.lower() == "active" else "pill-pending" if status.lower() in {"pending", "new"} else "pill-inactive"
+        if status.lower() in {"active", "probationary", "partial member", "full member"}:
+            status_class = "pill-active"
+        elif status.lower() == "pending":
+            status_class = "pill-pending"
+        else:
+            status_class = "pill-inactive"
         role_class = "pill-role"
 
         with st.container(border=True):
@@ -606,7 +611,7 @@ def admin_docs_view():
     with filter_col:
         filter_value = st.selectbox(
             "Filter by Role/Status",
-            options=["All", "Active", "Pending", "Inactive", "Full Member", "Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"],
+            options=["All", "Active", "Pending", "Probationary", "Partial Member", "Full Member", "Inactive", "Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"],
             key="admin_docs_filter",
         )
 
@@ -620,7 +625,7 @@ def admin_docs_view():
         if search_value and not any(search_value in value.lower() for value in [full_name, member_id, email]):
             continue
         if filter_value != "All":
-            if filter_value in {"Active", "Pending", "Inactive", "Full Member"} and filter_value.lower() not in status.lower():
+            if filter_value in {"Active", "Pending", "Probationary", "Partial Member", "Full Member", "Inactive"} and filter_value.lower() not in status.lower():
                 continue
             if filter_value in {"Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"} and filter_value.lower() not in role.lower():
                 continue
@@ -721,7 +726,7 @@ def admin_docs_view():
                     role_options = ["Member", "Secretary", "Treasurer", "Chairperson", "Vice Chairperson", "Welfare"]
                     selected_role = str(selected_member_detail.get("role") or "")
                     new_role = st.selectbox("Role", options=role_options, index=role_options.index(selected_role) if selected_role in role_options else 0, key="chairperson_role")
-                    status_options = ["Active", "Inactive", "Pending", "Full Member"]
+                    status_options = ["Pending", "Probationary", "Active", "Partial Member", "Full Member", "Inactive"]
                     selected_status = str(selected_member_detail.get("status") or "")
                     new_status = st.selectbox("Status", options=status_options, index=status_options.index(selected_status) if selected_status in status_options else 0, key="chairperson_status")
                     safe_join_date = _normalize_join_date(selected_member_detail.get("join_date"))

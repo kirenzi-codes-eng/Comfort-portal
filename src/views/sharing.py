@@ -12,8 +12,15 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from src.database.connection import execute_query
 
 
+def _coerce_optional_str(value: object | None) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_total_interest() -> float:
+    from src.views.loans import update_interest_accumulation
+
+    update_interest_accumulation()
     rows = execute_query("SELECT COALESCE(SUM(interest_accumulated),0) AS total_interest FROM loans;", params=None, fetch=True)
     return float(rows[0]["total_interest"] or 0) if rows else 0.0
 
@@ -31,6 +38,9 @@ def fetch_member_count_cached() -> int:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_member_interest(member_id: str) -> float:
+    from src.views.loans import update_interest_accumulation
+
+    update_interest_accumulation()
     rows = execute_query(
         "SELECT COALESCE(SUM(interest_accumulated),0) AS member_interest FROM loans WHERE member_id = %s;",
         params=(member_id,),
@@ -203,7 +213,7 @@ def load_sharing_workflow_from_db() -> Dict[str, object]:
         "SELECT active, activated_on FROM sharing_workflow_state WHERE id = 1;",
         params=None,
         fetch=True,
-    )
+    ) or []
     if rows:
         row = rows[0]
         activated_on = row["activated_on"].isoformat() if row["activated_on"] else None
@@ -228,7 +238,7 @@ def load_sharing_requests_from_db(cycle_on: str | None) -> Dict[str, Dict[str, o
         """,
         params=(cycle_on,),
         fetch=True,
-    )
+    ) or []
     requests: Dict[str, Dict[str, object]] = {}
     for row in rows:
         member_id = row["member_id"]
@@ -247,7 +257,7 @@ def load_sharing_requests_from_db(cycle_on: str | None) -> Dict[str, Dict[str, o
 def save_sharing_workflow_to_db(workflow: Dict[str, object]) -> None:
     ensure_sharing_tables()
     active = bool(workflow.get("active", False))
-    activated_on = workflow.get("activated_on")
+    activated_on = _coerce_optional_str(workflow.get("activated_on"))
     execute_query(
         """
         INSERT INTO sharing_workflow_state (id, active, activated_on, updated_at)
@@ -492,7 +502,7 @@ def render_allocation_profile_blocks(total_savings: float, withdrawable_cash: fl
 def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
     workflow = get_sharing_workflow()
     active = bool(workflow.get("active", False))
-    activated_on = workflow.get("activated_on")
+    activated_on = _coerce_optional_str(workflow.get("activated_on"))
     requests = workflow.get("requests", {})
     if not isinstance(requests, dict):
         requests = {}
@@ -537,7 +547,8 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
                         request["status"] = "approved"
                         request["approved_by"] = user_role
                         request["approved_on"] = datetime.utcnow().date().isoformat()
-                        approve_withdrawal_request_to_db(member_id, user_role, workflow.get("activated_on"))
+                        cycle_on = _coerce_optional_str(workflow.get("activated_on"))
+                        approve_withdrawal_request_to_db(member_id, user_role, cycle_on)
                         st.session_state.sharing_workflow = workflow
                         st.rerun()
 
@@ -579,7 +590,7 @@ def member_view(member_id: str):
 
     workflow = get_sharing_workflow()
     active = bool(workflow.get("active", False))
-    activated_on = workflow.get("activated_on")
+    activated_on = _coerce_optional_str(workflow.get("activated_on"))
     requests = workflow.get("requests", {})
     if not isinstance(requests, dict):
         requests = {}
@@ -632,7 +643,7 @@ def member_view(member_id: str):
             st.info("Withdrawal request sent. Waiting for Treasurer approval.")
         elif window_open and take_home_amount > 0:
             if st.button(f"Request Withdrawal of UGX {take_home_amount:,.0f}", key=f"withdraw_{member_id}"):
-                cycle_on = workflow.get("activated_on") if isinstance(workflow.get("activated_on"), str) else None
+                cycle_on = _coerce_optional_str(workflow.get("activated_on"))
                 if save_withdrawal_request_to_db(member_id, take_home_amount, cycle_on):
                     requests[member_id] = {
                         "member_id": member_id,

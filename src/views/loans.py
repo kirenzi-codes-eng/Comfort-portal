@@ -623,17 +623,18 @@ def inject_loans_theme() -> None:
 
 
 def update_interest_accumulation(reference_date: Optional[datetime] = None) -> None:
-    """Update outstanding balances for all Approved loans using 10% monthly compounding interest.
+    """Update outstanding balances for older active/approved loans using 10% monthly compounding interest.
 
     Assumptions:
-    - `interest_accumulated` column stores previously accumulated interest.
+    - `interest_accumulated` stores previously accumulated interest.
     - `outstanding_balance` is principal + interest_accumulated.
     - Principal is computed as `outstanding_balance - COALESCE(interest_accumulated, 0)`.
+    - Older loans without an approved date are backfilled from their applied date.
     """
     ref = reference_date or datetime.utcnow()
     rows = execute_query(
-        "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, approved_date "
-        "FROM loans WHERE status = 'Approved';",
+        "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, approved_date, applied_date "
+        "FROM loans WHERE status IN ('Approved', 'Active');",
         params=None,
         fetch=True,
     )
@@ -645,13 +646,13 @@ def update_interest_accumulation(reference_date: Optional[datetime] = None) -> N
             loan_id = loan["loan_id"]
             outstanding = float(loan["outstanding_balance"] or 0)
             interest_acc = float(loan["interest_accumulated"] or 0)
-            approved_date = loan.get("approved_date")
-            if not approved_date:
+            start_date = loan.get("approved_date") or loan.get("applied_date")
+            if not start_date:
                 continue
-            if isinstance(approved_date, str):
-                approved_date = datetime.fromisoformat(approved_date)
+            if isinstance(start_date, str):
+                start_date = datetime.fromisoformat(start_date)
 
-            months = months_between(approved_date, ref)
+            months = months_between(start_date, ref)
             if interest_acc == 0 and months >= 0:
                 months = max(1, months)
             elif months <= 0:
