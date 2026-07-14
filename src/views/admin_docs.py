@@ -311,6 +311,33 @@ def fetch_member_record(member_id: str) -> Optional[Dict]:
     return fetch_member_record_cached(member_id)
 
 
+def _resolve_member_profile_detail(member_id: Optional[str], directory_members: List[Dict], fallback_members: Optional[List[Dict]] = None) -> Optional[Dict]:
+    if not member_id:
+        return None
+
+    full_member = fetch_member_record(str(member_id))
+    if full_member:
+        directory_match = next((member for member in directory_members if str(member.get("member_id") or "") == str(member_id)), None)
+        if directory_match:
+            merged = dict(directory_match)
+            for key, value in full_member.items():
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                merged[key] = value
+            return merged
+        return full_member
+
+    directory_match = next((member for member in directory_members if str(member.get("member_id") or "") == str(member_id)), None)
+    if directory_match:
+        return directory_match
+
+    if fallback_members:
+        return next((member for member in fallback_members if str(member.get("member_id") or "") == str(member_id)), None)
+    return None
+
+
 @st.cache_data(ttl=300)
 def fetch_member_record_cached(member_id: str) -> Optional[Dict]:
     rows = execute_query(
@@ -675,9 +702,9 @@ def admin_docs_view():
         st.markdown("</div>", unsafe_allow_html=True)
 
     if selected_member_id:
-        selected_member_detail = next((member for member in filtered_members if str(member.get("member_id") or "") == selected_member_id), None)
+        selected_member_detail = _resolve_member_profile_detail(selected_member_id, filtered_members, members)
         if selected_member_detail is None:
-            selected_member_detail = fetch_member_record(selected_member_id) or (members[0] if members else None)
+            selected_member_detail = members[0] if members else None
 
         if selected_member_detail is None:
             st.error("Unable to load the selected member's profile. Please try again.")

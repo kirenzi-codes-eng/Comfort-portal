@@ -1,9 +1,15 @@
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import patch
 
 from src.views.home import calculate_effective_loan_balance, get_financial_metrics_cached, safe_execute_query
-from src.views.loans import update_interest_accumulation
+from src.views.loans import (
+    create_historical_loan_record,
+    get_loan_interest_schedule,
+    months_between,
+    should_apply_interest_for_loan,
+    update_interest_accumulation,
+)
 
 
 class LoanBalanceTests(unittest.TestCase):
@@ -54,6 +60,53 @@ class LoanBalanceTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertAlmostEqual(updates[0][0], 100.0)
         self.assertAlmostEqual(updates[0][1], 1100.0)
+
+    def test_months_between_counts_partial_months_for_daily_interest(self):
+        self.assertAlmostEqual(months_between(datetime(2026, 5, 11), datetime(2026, 7, 14)), 2 + (3 / 31), places=4)
+
+    def test_grace_period_defers_interest_until_ten_days_after_start(self):
+        start_date = datetime(2026, 5, 11, 9, 0)
+        reference_date = datetime(2026, 5, 20, 8, 0)
+        self.assertFalse(should_apply_interest_for_loan(start_date, reference_date, None, None))
+
+    def test_payment_triggers_immediate_interest_after_grace_period(self):
+        start_date = datetime(2026, 5, 11, 9, 0)
+        reference_date = datetime(2026, 5, 21, 8, 0)
+        last_interest_date = datetime(2026, 5, 20, 8, 0)
+        last_payment_date = datetime(2026, 5, 21, 8, 0)
+        self.assertTrue(should_apply_interest_for_loan(start_date, reference_date, last_interest_date, last_payment_date))
+
+    def test_get_loan_interest_schedule_reports_grace_and_next_interest_dates(self):
+        start_date = datetime(2026, 5, 11, 9, 0)
+        next_due, grace_end = get_loan_interest_schedule(start_date, None, None, None)
+        self.assertEqual(next_due, date(2026, 5, 21))
+        self.assertEqual(grace_end, date(2026, 5, 21))
+
+    def test_create_historical_loan_record_inserts_and_backfills_interest(self):
+        insert_calls = []
+
+        def fake_execute(query, params=None, fetch=False):
+            insert_calls.append((query, params, fetch))
+            return None
+
+        with patch("src.views.loans.ensure_loans_purpose_column", return_value=True), \
+             patch("src.views.loans.execute_query", side_effect=fake_execute), \
+             patch("src.views.loans.update_interest_accumulation") as mock_update:
+            created = create_historical_loan_record(
+                member_id="member-1",
+                principal_amount=5000.0,
+                loan_date=date(2023, 1, 1),
+                status="Cleared",
+                accumulated_interest=250.0,
+                notes="Legacy repayment before launch",
+            )
+
+        self.assertTrue(created)
+        self.assertEqual(insert_calls[0][1][0], "member-1")
+        self.assertEqual(insert_calls[0][1][1], 5000.0)
+        self.assertEqual(insert_calls[0][1][3], "Legacy repayment before launch")
+        self.assertEqual(insert_calls[0][1][7], 250.0)
+        mock_update.assert_not_called()
 
     @patch("src.views.home.get_effective_member_balance", return_value=0.0)
     def test_get_financial_metrics_cached_returns_zero_balance_when_no_active_loans(self, _):

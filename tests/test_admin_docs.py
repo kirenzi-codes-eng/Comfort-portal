@@ -58,6 +58,25 @@ class BuildMemberProfileUpdateTests(unittest.TestCase):
         self.assertEqual(params[-1], "CBO-001")
         self.assertEqual(params[5], date(2024, 1, 15))
 
+    def test_resolve_member_profile_detail_prefers_full_record_over_directory_row(self):
+        directory_member = {"member_id": "CBO-001", "full_name": "Jane Doe", "email": "jane@example.com"}
+        full_member = {
+            "member_id": "CBO-001",
+            "full_name": "Jane Doe",
+            "occupation": "Teacher",
+            "employer": "School",
+            "national_id": "123456789",
+        }
+
+        with patch.object(admin_docs, "fetch_member_record", return_value=full_member):
+            resolved = admin_docs._resolve_member_profile_detail("CBO-001", [directory_member], [directory_member])
+
+        self.assertEqual(resolved["member_id"], full_member["member_id"])
+        self.assertEqual(resolved["occupation"], full_member["occupation"])
+        self.assertEqual(resolved["employer"], full_member["employer"])
+        self.assertEqual(resolved["national_id"], full_member["national_id"])
+        self.assertEqual(resolved["email"], directory_member["email"])
+
 
 if __name__ == "__main__":
     unittest.main()

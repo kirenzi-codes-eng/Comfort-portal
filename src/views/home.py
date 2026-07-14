@@ -934,13 +934,13 @@ def home_view():
                 fallback=[{"total_arrears": MOCK_ADMIN_METRICS["total_arrears"]}],
             ) or [{"total_arrears": MOCK_ADMIN_METRICS["total_arrears"]}]
             admin_borrowers_rows = safe_execute_query(
-                "SELECT m.full_name AS member_name, l.status AS loan_status "
+                "SELECT m.full_name AS member_name, l.status AS loan_status, COALESCE(l.outstanding_balance,0) AS loan_balance "
                 "FROM loans l JOIN members m ON m.member_id = l.member_id "
                 "WHERE l.status IN ('Active','Approved') AND COALESCE(l.outstanding_balance,0) > 0 "
                 "ORDER BY l.outstanding_balance DESC;",
                 params=None,
                 fetch=True,
-                fallback=[],
+                fallback=[{"member_name": x["Member"], "loan_status": "Active", "loan_balance": x["Loan Balance"]} for x in MOCK_ACTIVE_BORROWERS],
             ) or []
 
             total_pool_savings = float(admin_pool_rows[0].get("total_pool_savings") or 0)
@@ -962,17 +962,23 @@ def home_view():
 
             borrower_table = []
             for row in admin_borrowers_rows:
+                # Support both DB row shape and fallback/mock shape
+                member_name = row.get("member_name") or row.get("Member") or "Unknown"
+                loan_balance_val = float(row.get("loan_balance") or row.get("Loan Balance") or 0)
                 borrower_table.append({
-                    "Member": row.get("member_name") or "Unknown",
-                    "Loan Status": row.get("loan_status") or "Unknown",
+                    "Member": member_name,
+                    "Loan Balance": loan_balance_val,
+                    "Loan Status": row.get("loan_status") or row.get("Loan Status") or "Unknown",
                 })
 
             if borrower_table:
+                borrower_df = pd.DataFrame(borrower_table)
+                borrower_df["Loan Balance"] = borrower_df["Loan Balance"].map(lambda value: f"UGX {value:,.0f}")
                 st.dataframe(
-                    pd.DataFrame(borrower_table),
+                    borrower_df,
                     width="stretch",
                     hide_index=True,
-                    column_config={column: {"width": "small"} for column in pd.DataFrame(borrower_table).columns},
+                    column_config={column: {"width": "small"} for column in borrower_df.columns},
                 )
             else:
                 st.info("No active borrowers found.")

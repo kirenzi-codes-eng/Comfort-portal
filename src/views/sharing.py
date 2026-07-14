@@ -576,6 +576,7 @@ def member_view(member_id: str):
     total_savings = fetch_total_savings(member_id)
     engine = calculate_dividends()
     total_interest = engine["total_interest"]
+    admin_pool = engine["admin_pool"]
 
     member_interest = fetch_member_interest(member_id)
     member_rebate_pool = engine["member_rebate_pool"]
@@ -794,7 +795,7 @@ def sharing_view():
             total_savings = sum(m["total_savings"] for m in members)
             total_dividend = sum(m["dividend_share"] for m in members)
             total_net = sum(m["net_payout"] for m in members)
-        
+            admin_pool = calculate_dividends()["admin_pool"]
 
         st.markdown(
             f"""
@@ -809,6 +810,10 @@ def sharing_view():
                 <div class='sh-exec-metric'>
                   <div class='sh-exec-metric-label'>Aggregate Withdrawable + Dividends</div>
                   <div class='sh-exec-metric-value'>UGX {total_net:,.0f}</div>
+                </div>
+                <div class='sh-exec-metric'>
+                  <div class='sh-exec-metric-label'>Admin Cost Fee Deducted</div>
+                  <div class='sh-exec-metric-value'>UGX {admin_pool:,.0f}</div>
                 </div>
               </div>
             </div>

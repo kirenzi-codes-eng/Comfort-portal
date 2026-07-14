@@ -1,8 +1,10 @@
 import time
-import streamlit as st
-from datetime import datetime, date
+from calendar import monthrange
+from datetime import datetime, date, timedelta
 from html import escape
 from typing import Any, Optional, Tuple
+
+import streamlit as st
 
 import pandas as pd
 
@@ -13,8 +15,109 @@ from src.views.home import get_financial_metrics, calculate_member_status, forma
 LEADERSHIP_ROLES = ("Treasurer", "Secretary", "Chairperson")
 
 
-def months_between(start_date: datetime, end_date: datetime) -> int:
-    return max(0, (end_date.year - start_date.year) * 12 + end_date.month - start_date.month)
+def months_between(start_date: datetime, end_date: datetime) -> float:
+    if end_date < start_date:
+        return 0.0
+
+    whole_months = max(0, (end_date.year - start_date.year) * 12 + end_date.month - start_date.month)
+    if whole_months == 0:
+        return max(0.0, (end_date - start_date).days / 30.0)
+
+    anchor_date = start_date.replace(year=start_date.year + (start_date.month - 1 + whole_months) // 12,
+                                     month=(start_date.month - 1 + whole_months) % 12 + 1)
+    if anchor_date > end_date:
+        whole_months -= 1
+        anchor_date = start_date.replace(year=start_date.year + (start_date.month - 1 + whole_months) // 12,
+                                         month=(start_date.month - 1 + whole_months) % 12 + 1)
+
+    if anchor_date >= end_date:
+        return float(whole_months)
+
+    days_in_partial_month = monthrange(end_date.year, end_date.month)[1]
+    partial_days = (end_date - anchor_date).days
+    return float(whole_months) + (partial_days / days_in_partial_month if partial_days > 0 else 0.0)
+
+
+def should_apply_interest_for_loan(
+    start_date: Optional[datetime],
+    reference_date: datetime,
+    last_interest_date: Optional[datetime],
+    last_payment_date: Optional[datetime],
+    grace_period_days: int = 10,
+) -> bool:
+    if start_date is None:
+        return False
+
+    grace_deadline = start_date.date() + timedelta(days=grace_period_days)
+    if reference_date.date() < grace_deadline:
+        return False
+
+    if last_interest_date is None:
+        return True
+
+    if last_payment_date and last_payment_date.date() >= last_interest_date.date():
+        return True
+
+    return reference_date.date() >= last_interest_date.date() + timedelta(days=30)
+
+
+def _coerce_loan_date(value: Any | None) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return datetime.fromisoformat(cleaned.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+    return None
+
+
+def get_loan_interest_schedule(
+    start_date: Optional[datetime | date | str],
+    last_interest_date: Optional[datetime | date | str],
+    last_payment_date: Optional[datetime | date | str],
+    reference_date: Optional[datetime | date | str] = None,
+) -> tuple[Optional[date], Optional[date]]:
+    start_day = _coerce_loan_date(start_date)
+    if start_day is None:
+        return None, None
+
+    grace_end = start_day + timedelta(days=10)
+    if last_interest_date is None:
+        next_interest_due = grace_end
+    else:
+        last_interest_day = _coerce_loan_date(last_interest_date)
+        last_payment_day = _coerce_loan_date(last_payment_date)
+        anchor_day = last_interest_day or start_day
+        if last_payment_day and last_interest_day and last_payment_day >= last_interest_day:
+            anchor_day = last_payment_day
+        next_interest_due = anchor_day + timedelta(days=30)
+
+    return next_interest_due, grace_end
+
+
+def ensure_loan_interest_tracking_columns() -> None:
+    """Add loan date-tracking columns needed for grace-period interest logic."""
+    try:
+        execute_query(
+            "ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_interest_applied_at DATE;",
+            params=None,
+            fetch=False,
+        )
+        execute_query(
+            "ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_payment_applied_at DATE;",
+            params=None,
+            fetch=False,
+        )
+    except Exception as exc:
+        st.warning(f"Unable to ensure loan interest tracking columns: {exc}")
 
 
 def normalize_loan_status(status: Optional[str]) -> str:
@@ -68,7 +171,7 @@ def fetch_latest_member_loan(member_id: Optional[str]) -> Optional[dict]:
     if not member_id:
         return None
     rows = execute_query(
-        "SELECT loan_id, amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, status, approved_by, approved_date, applied_date "
+        "SELECT loan_id, amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, status, approved_by, approved_date, applied_date, last_interest_applied_at, last_payment_applied_at "
         "FROM loans WHERE member_id = %s ORDER BY applied_date DESC, loan_id DESC LIMIT 1;",
         params=(member_id,),
         fetch=True,
@@ -623,17 +726,17 @@ def inject_loans_theme() -> None:
 
 
 def update_interest_accumulation(reference_date: Optional[datetime] = None) -> None:
-    """Update outstanding balances for older active/approved loans using 10% monthly compounding interest.
+    """Apply grace-period interest to active/approved loans.
 
-    Assumptions:
-    - `interest_accumulated` stores previously accumulated interest.
-    - `outstanding_balance` is principal + interest_accumulated.
-    - Principal is computed as `outstanding_balance - COALESCE(interest_accumulated, 0)`.
-    - Older loans without an approved date are backfilled from their applied date.
+    Interest is applied once the loan is older than the 10-day grace period. If a repayment has
+    occurred since the last interest charge, the current balance is charged immediately. Otherwise,
+    the balance is charged again once a month while the loan remains unpaid.
     """
+    ensure_loan_interest_tracking_columns()
+
     ref = reference_date or datetime.utcnow()
     rows = execute_query(
-        "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, approved_date, applied_date "
+        "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, approved_date, applied_date, last_interest_applied_at, last_payment_applied_at "
         "FROM loans WHERE status IN ('Approved', 'Active');",
         params=None,
         fetch=True,
@@ -652,24 +755,101 @@ def update_interest_accumulation(reference_date: Optional[datetime] = None) -> N
             if isinstance(start_date, str):
                 start_date = datetime.fromisoformat(start_date)
 
-            months = months_between(start_date, ref)
-            if interest_acc == 0 and months >= 0:
-                months = max(1, months)
-            elif months <= 0:
+            last_interest_date = loan.get("last_interest_applied_at")
+            if isinstance(last_interest_date, str):
+                last_interest_date = datetime.fromisoformat(last_interest_date)
+            elif isinstance(last_interest_date, date) and not isinstance(last_interest_date, datetime):
+                last_interest_date = datetime.combine(last_interest_date, datetime.min.time())
+
+            last_payment_date = loan.get("last_payment_applied_at")
+            if isinstance(last_payment_date, str):
+                last_payment_date = datetime.fromisoformat(last_payment_date)
+            elif isinstance(last_payment_date, date) and not isinstance(last_payment_date, datetime):
+                last_payment_date = datetime.combine(last_payment_date, datetime.min.time())
+
+            if not should_apply_interest_for_loan(start_date, ref, last_interest_date, last_payment_date):
                 continue
 
             principal = max(0.0, outstanding - interest_acc)
-            compounded = principal * ((1.10) ** months)
+            compounded = principal * 1.10
             new_interest = compounded - principal
             new_outstanding = compounded
 
             execute_query(
-                "UPDATE loans SET interest_accumulated = %s, outstanding_balance = %s WHERE loan_id = %s;",
-                params=(new_interest, new_outstanding, loan_id),
+                "UPDATE loans SET interest_accumulated = %s, outstanding_balance = %s, last_interest_applied_at = %s WHERE loan_id = %s;",
+                params=(new_interest, new_outstanding, ref.date(), loan_id),
                 fetch=False,
             )
         except Exception as e:
             st.error(f"Failed to update interest for loan {loan.get('loan_id')}: {e}")
+
+
+def create_historical_loan_record(
+    member_id: Optional[str],
+    principal_amount: float,
+    loan_date: date | datetime | None,
+    status: str = "Cleared",
+    outstanding_balance: Optional[float] = None,
+    accumulated_interest: Optional[float] = None,
+    notes: Optional[str] = None,
+) -> bool:
+    """Insert a historical loan record and use either supplied accumulated interest or backfill logic for sharing."""
+    if not member_id:
+        return False
+
+    if loan_date is None:
+        loan_date = datetime.utcnow().date()
+
+    if isinstance(loan_date, datetime):
+        loan_date_value = loan_date.date()
+    else:
+        loan_date_value = loan_date
+
+    if outstanding_balance is not None:
+        effective_outstanding = float(outstanding_balance)
+    elif accumulated_interest is not None:
+        effective_outstanding = float(principal_amount) + float(accumulated_interest)
+    else:
+        effective_outstanding = float(principal_amount)
+
+    effective_interest = float(accumulated_interest) if accumulated_interest is not None else 0.0
+    purpose_supported = ensure_loans_purpose_column()
+    try:
+        if purpose_supported:
+            execute_query(
+                "INSERT INTO loans (member_id, amount_requested, outstanding_balance, purpose, status, applied_date, approved_date, interest_accumulated) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);",
+                params=(
+                    member_id,
+                    principal_amount,
+                    effective_outstanding,
+                    notes or "Historical loan entered for backfill",
+                    status,
+                    loan_date_value,
+                    loan_date_value,
+                    effective_interest,
+                ),
+                fetch=False,
+            )
+        else:
+            execute_query(
+                "INSERT INTO loans (member_id, amount_requested, outstanding_balance, status, applied_date, approved_date, interest_accumulated) VALUES (%s, %s, %s, %s, %s, %s, %s);",
+                params=(
+                    member_id,
+                    principal_amount,
+                    effective_outstanding,
+                    status,
+                    loan_date_value,
+                    loan_date_value,
+                    effective_interest,
+                ),
+                fetch=False,
+            )
+        if accumulated_interest is None:
+            update_interest_accumulation()
+        return True
+    except Exception as exc:
+        st.error(f"Failed to save historical loan: {exc}")
+        return False
 
 
 def validate_personal_loan_eligibility(user_id: Optional[str], user_status: Optional[str]) -> Tuple[bool, Optional[str]]:
@@ -830,6 +1010,13 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
             applied_date = format_loan_date(latest_loan.get('applied_date'))
             approved_date = format_loan_date(latest_loan.get('approved_date'))
             approved_by = latest_loan.get('approved_by') or 'Awaiting review by leadership'
+            next_interest_due, grace_end = get_loan_interest_schedule(
+                latest_loan.get('approved_date') or latest_loan.get('applied_date'),
+                latest_loan.get('last_interest_applied_at'),
+                latest_loan.get('last_payment_applied_at'),
+            )
+            next_interest_display = format_loan_date(next_interest_due) if next_interest_due else 'Pending review'
+            grace_end_display = format_loan_date(grace_end) if grace_end else 'Pending review'
             st.markdown(
                 f"""
                 <div class='loan-application-card' style='margin-top: 1.5rem;'>
@@ -841,6 +1028,8 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
                     <div style='color:#64748b;'>Interest accumulated: {interest_accumulated}</div>
                     <div style='color:#64748b;'>Applied: {applied_date}</div>
                     <div style='color:#64748b;'>Approved: {approved_date}</div>
+                    <div style='color:#64748b;'>Next interest due: {next_interest_display}</div>
+                    <div style='color:#64748b;'>Grace period ends on: {grace_end_display}</div>
                     <div style='color:#64748b;'>Review: {approved_by}</div>
                   </div>
                 </div>
@@ -981,6 +1170,35 @@ def render_executive_credit_control(user_role: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    if user_role == "Chairperson":
+        with st.expander("Add historical loan for sharing backfill", expanded=False):
+            with st.form("historical_loan_form"):
+                member_id = st.text_input("Member ID", key="historical_member_id")
+                principal_amount = st.number_input("Principal Amount", min_value=0.0, step=100.0, format="%.2f", key="historical_principal")
+                loan_date = st.date_input("Loan Date", key="historical_loan_date")
+                status = st.selectbox("Loan Status", ["Cleared", "Approved", "Active", "Closed"], key="historical_status")
+                accumulated_interest = st.number_input("Accumulated Interest Already Collected", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="historical_interest")
+                st.caption("This amount will be included in the member's sharing rebate calculation.")
+                outstanding_balance = st.number_input("Outstanding Balance (optional)", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="historical_outstanding")
+                notes = st.text_area("Notes", placeholder="e.g. Old loan taken before launch and repaid later", key="historical_notes")
+                submitted = st.form_submit_button("Save Historical Loan")
+                if submitted:
+                    if not member_id:
+                        st.warning("Member ID is required.")
+                    else:
+                        saved = create_historical_loan_record(
+                            member_id=member_id,
+                            principal_amount=float(principal_amount),
+                            loan_date=loan_date,
+                            status=status,
+                            outstanding_balance=float(outstanding_balance) if outstanding_balance else None,
+                            accumulated_interest=float(accumulated_interest) if accumulated_interest else None,
+                            notes=notes.strip() or None,
+                        )
+                        if saved:
+                            st.success("Historical loan saved and included in sharing calculations.")
+                            st.rerun()
 
     status_tabs = st.tabs(["Review Queue", "Approved Loans", "Rejected Requests"])
 

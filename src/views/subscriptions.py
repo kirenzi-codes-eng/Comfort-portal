@@ -1168,8 +1168,8 @@ def treasurer_view(user_role: str):
                                 new_outstanding = new_principal + new_interest
 
                                 execute_query(
-                                    "UPDATE loans SET outstanding_balance = %s, interest_accumulated = %s WHERE loan_id = %s;",
-                                    params=(new_outstanding, new_interest, loan_id),
+                                    "UPDATE loans SET outstanding_balance = %s, interest_accumulated = %s, last_payment_applied_at = %s WHERE loan_id = %s;",
+                                    params=(new_outstanding, new_interest, date.today(), loan_id),
                                     fetch=False,
                                 )
                                 st.toast("Repayment applied to active loan.", icon="✅")
