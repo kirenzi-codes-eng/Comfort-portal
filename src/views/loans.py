@@ -10,7 +10,7 @@ import pandas as pd
 
 from src.database.connection import execute_query
 from src.utils.membership import normalize_membership_status
-from src.views.home import get_financial_metrics, calculate_member_status, format_currency
+from src.views.home import get_financial_metrics, calculate_member_status, format_currency, parse_db_datetime
 
 LEADERSHIP_ROLES = ("Treasurer", "Secretary", "Chairperson")
 
@@ -39,44 +39,44 @@ def months_between(start_date: datetime, end_date: datetime) -> float:
 
 
 def should_apply_interest_for_loan(
-    start_date: Optional[datetime],
-    reference_date: datetime,
-    last_interest_date: Optional[datetime],
-    last_payment_date: Optional[datetime],
+    start_date: Optional[datetime | date | str],
+    reference_date: Optional[datetime | date | str],
+    last_interest_date: Optional[datetime | date | str],
+    last_payment_date: Optional[datetime | date | str],
     grace_period_days: int = 10,
 ) -> bool:
-    if start_date is None:
+    start_day = _coerce_loan_date(start_date)
+    if start_day is None or reference_date is None:
         return False
 
-    grace_deadline = start_date.date() + timedelta(days=grace_period_days)
-    if reference_date.date() < grace_deadline:
+    reference_day = _coerce_loan_date(reference_date)
+    if reference_day is None:
+        return False
+
+    if reference_day < start_day + timedelta(days=grace_period_days):
         return False
 
     if last_interest_date is None:
         return True
 
-    if last_payment_date and last_payment_date.date() >= last_interest_date.date():
+    last_interest_day = _coerce_loan_date(last_interest_date)
+    if last_interest_day is None:
         return True
 
-    return reference_date.date() >= last_interest_date.date() + timedelta(days=30)
+    last_payment_day = _coerce_loan_date(last_payment_date)
+    if last_payment_day and last_payment_day >= last_interest_day:
+        return True
+
+    return reference_day >= last_interest_day + timedelta(days=30)
 
 
 def _coerce_loan_date(value: Any | None) -> Optional[date]:
     if value is None:
         return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
+    if isinstance(value, date) and not isinstance(value, datetime):
         return value
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if not cleaned:
-            return None
-        try:
-            return datetime.fromisoformat(cleaned.replace("Z", "+00:00")).date()
-        except ValueError:
-            return None
-    return None
+    parsed_datetime = parse_db_datetime(value)
+    return parsed_datetime.date() if parsed_datetime else None
 
 
 def get_loan_interest_schedule(
@@ -725,7 +725,7 @@ def inject_loans_theme() -> None:
     )
 
 
-def update_interest_accumulation(reference_date: Optional[datetime] = None) -> None:
+def update_interest_accumulation(reference_date: Optional[datetime | date] = None) -> None:
     """Apply grace-period interest to active/approved loans.
 
     Interest is applied once the loan is older than the 10-day grace period. If a repayment has
@@ -734,7 +734,8 @@ def update_interest_accumulation(reference_date: Optional[datetime] = None) -> N
     """
     ensure_loan_interest_tracking_columns()
 
-    ref = reference_date or datetime.utcnow()
+    ref = parse_db_datetime(reference_date) or datetime.utcnow()
+    ref_date = ref.date()
     rows = execute_query(
         "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, approved_date, applied_date, last_interest_applied_at, last_payment_applied_at "
         "FROM loans WHERE status IN ('Approved', 'Active');",
@@ -749,23 +750,12 @@ def update_interest_accumulation(reference_date: Optional[datetime] = None) -> N
             loan_id = loan["loan_id"]
             outstanding = float(loan["outstanding_balance"] or 0)
             interest_acc = float(loan["interest_accumulated"] or 0)
-            start_date = loan.get("approved_date") or loan.get("applied_date")
-            if not start_date:
+            start_date = _coerce_loan_date(loan.get("approved_date") or loan.get("applied_date"))
+            if start_date is None:
                 continue
-            if isinstance(start_date, str):
-                start_date = datetime.fromisoformat(start_date)
 
-            last_interest_date = loan.get("last_interest_applied_at")
-            if isinstance(last_interest_date, str):
-                last_interest_date = datetime.fromisoformat(last_interest_date)
-            elif isinstance(last_interest_date, date) and not isinstance(last_interest_date, datetime):
-                last_interest_date = datetime.combine(last_interest_date, datetime.min.time())
-
-            last_payment_date = loan.get("last_payment_applied_at")
-            if isinstance(last_payment_date, str):
-                last_payment_date = datetime.fromisoformat(last_payment_date)
-            elif isinstance(last_payment_date, date) and not isinstance(last_payment_date, datetime):
-                last_payment_date = datetime.combine(last_payment_date, datetime.min.time())
+            last_interest_date = _coerce_loan_date(loan.get("last_interest_applied_at"))
+            last_payment_date = _coerce_loan_date(loan.get("last_payment_applied_at"))
 
             if not should_apply_interest_for_loan(start_date, ref, last_interest_date, last_payment_date):
                 continue
@@ -777,7 +767,7 @@ def update_interest_accumulation(reference_date: Optional[datetime] = None) -> N
 
             execute_query(
                 "UPDATE loans SET interest_accumulated = %s, outstanding_balance = %s, last_interest_applied_at = %s WHERE loan_id = %s;",
-                params=(new_interest, new_outstanding, ref.date(), loan_id),
+                params=(new_interest, new_outstanding, ref_date, loan_id),
                 fetch=False,
             )
         except Exception as e:
@@ -798,12 +788,10 @@ def create_historical_loan_record(
         return False
 
     if loan_date is None:
-        loan_date = datetime.utcnow().date()
-
-    if isinstance(loan_date, datetime):
-        loan_date_value = loan_date.date()
+        loan_date_value = datetime.utcnow().date()
     else:
-        loan_date_value = loan_date
+        parsed_loan_date = parse_db_datetime(loan_date)
+        loan_date_value = parsed_loan_date.date() if parsed_loan_date else datetime.utcnow().date()
 
     if outstanding_balance is not None:
         effective_outstanding = float(outstanding_balance)

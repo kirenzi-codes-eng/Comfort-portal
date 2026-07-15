@@ -4,7 +4,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, date
 from functools import lru_cache
 from urllib.parse import quote_plus
 
@@ -645,7 +645,12 @@ def auth_ui():
                     full_name = st.text_input("Full Name")
                     email = st.text_input("Email")
                     phone = st.text_input("Phone Number")
-                    date_of_birth = st.date_input("Date of Birth", value=None)
+                    date_of_birth = st.date_input(
+                        "Date of Birth",
+                        value=None,
+                        min_value=date(1964, 1, 1),
+                        max_value=date(2024, 12, 31),
+                    )
                     gender = st.selectbox("Gender", ["", "Male", "Female", "Other", "Prefer not to say"], index=0)
                     address = st.text_input("Address")
                     city = st.text_input("City")

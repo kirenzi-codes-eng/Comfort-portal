@@ -1,5 +1,5 @@
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from typing import List, Dict
 
 import pandas as pd
@@ -10,10 +10,25 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 from src.database.connection import execute_query
+from src.views.home import parse_db_datetime
 
 
 def _coerce_optional_str(value: object | None) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _coerce_sharing_date(value: object | None) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    parsed = parse_db_datetime(value)
+    return parsed.date() if parsed else None
+
+
+def _today_iso() -> str:
+    """Return current UTC date as ISO string (YYYY-MM-DD)."""
+    return datetime.utcnow().date().isoformat()
 
 
 @st.cache_data(show_spinner=False, ttl=30)
@@ -296,7 +311,7 @@ def save_withdrawal_request_to_db(member_id: str, amount: float, cycle_on: str |
         INSERT INTO sharing_withdrawal_requests (member_id, amount, status, requested_on, cycle_on)
         VALUES (%s, %s, %s, %s, %s);
         """,
-        params=(member_id, amount, "pending", datetime.utcnow().date().isoformat(), cycle_on),
+        params=(member_id, amount, "pending", _today_iso(), cycle_on),
         fetch=False,
     )
     return True
@@ -316,9 +331,10 @@ def approve_withdrawal_request_to_db(member_id: str, approved_by: str, cycle_on:
         WHERE member_id = %s AND cycle_on = %s AND status = 'pending'
         RETURNING id, amount;
         """,
-        params=("approved", approved_by, datetime.utcnow().date().isoformat(), member_id, cycle_on),
+        params=("approved", approved_by, _today_iso(), member_id, cycle_on),
         fetch=True,
-    )
+    ) or []
+
     if not rows:
         return None
 
@@ -330,7 +346,7 @@ def approve_withdrawal_request_to_db(member_id: str, approved_by: str, cycle_on:
             INSERT INTO member_balance_adjustments (member_id, adjustment_type, amount, reference, reference_id, created_on)
             VALUES (%s, %s, %s, %s, %s, %s);
             """,
-            params=(member_id, "withdrawal", approved_amount, "sharing_withdrawal", request_id, datetime.utcnow().date().isoformat()),
+            params=(member_id, "withdrawal", approved_amount, "sharing_withdrawal", request_id, _today_iso()),
             fetch=False,
         )
 
@@ -512,8 +528,8 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
         st.markdown("### Sharing Control")
         if active:
             st.success("Sharing system is active.")
-            if isinstance(activated_on, str):
-                activated_date = datetime.strptime(activated_on, "%Y-%m-%d").date()
+            activated_date = _coerce_sharing_date(activated_on)
+            if activated_date is not None:
                 deadline = activated_date + timedelta(days=15)
                 days_left = max((deadline - datetime.utcnow().date()).days, 0)
                 st.caption(f"Withdrawal window is open for {days_left} more day(s) from the activation date.")
@@ -523,7 +539,7 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
         if st.button("Deactivate Sharing System" if active else "Activate Sharing System", key="toggle_sharing_system"):
             workflow["active"] = not active
             if workflow["active"]:
-                workflow["activated_on"] = datetime.utcnow().date().isoformat()
+                workflow["activated_on"] = _today_iso()
             else:
                 workflow["activated_on"] = None
             save_sharing_workflow_to_db(workflow)
@@ -546,7 +562,7 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
                     if st.button("Approve", key=f"approve_{member_id}"):
                         request["status"] = "approved"
                         request["approved_by"] = user_role
-                        request["approved_on"] = datetime.utcnow().date().isoformat()
+                        request["approved_on"] = _today_iso()
                         cycle_on = _coerce_optional_str(workflow.get("activated_on"))
                         approve_withdrawal_request_to_db(member_id, user_role, cycle_on)
                         st.session_state.sharing_workflow = workflow
@@ -602,10 +618,11 @@ def member_view(member_id: str):
         if isinstance(request_details, dict):
             request_status = request_details.get("status")
     window_open = False
-    if active and isinstance(activated_on, str):
-        activated_date = datetime.strptime(activated_on, "%Y-%m-%d").date()
-        deadline = activated_date + timedelta(days=15)
-        window_open = (datetime.utcnow().date() <= deadline)
+    if active:
+        activated_date = _coerce_sharing_date(activated_on)
+        if activated_date is not None:
+            deadline = activated_date + timedelta(days=15)
+            window_open = (datetime.utcnow().date() <= deadline)
 
     if reserve_shortfall > 0:
         st.markdown(
@@ -650,7 +667,7 @@ def member_view(member_id: str):
                         "member_id": member_id,
                         "amount": take_home_amount,
                         "status": "pending",
-                        "requested_on": datetime.utcnow().date().isoformat(),
+                        "requested_on": _today_iso(),
                     }
                     workflow["requests"] = requests
                     st.session_state.sharing_workflow = workflow

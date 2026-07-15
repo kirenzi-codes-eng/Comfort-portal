@@ -638,7 +638,7 @@ def admin_docs_view():
     with filter_col:
         filter_value = st.selectbox(
             "Filter by Role/Status",
-            options=["All", "Active", "Pending", "Probationary", "Partial Member", "Full Member", "Inactive", "Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"],
+            options=["All", "Active", "Pending", "Probationary", "Partial Member", "Full Member", "Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"],
             key="admin_docs_filter",
         )
 
@@ -652,7 +652,7 @@ def admin_docs_view():
         if search_value and not any(search_value in value.lower() for value in [full_name, member_id, email]):
             continue
         if filter_value != "All":
-            if filter_value in {"Active", "Pending", "Probationary", "Partial Member", "Full Member", "Inactive"} and filter_value.lower() not in status.lower():
+            if filter_value in {"Active", "Pending", "Probationary", "Partial Member", "Full Member"} and filter_value.lower() not in status.lower():
                 continue
             if filter_value in {"Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"} and filter_value.lower() not in role.lower():
                 continue
@@ -753,7 +753,7 @@ def admin_docs_view():
                     role_options = ["Member", "Secretary", "Treasurer", "Chairperson", "Vice Chairperson", "Welfare"]
                     selected_role = str(selected_member_detail.get("role") or "")
                     new_role = st.selectbox("Role", options=role_options, index=role_options.index(selected_role) if selected_role in role_options else 0, key="chairperson_role")
-                    status_options = ["Pending", "Probationary", "Active", "Partial Member", "Full Member", "Inactive"]
+                    status_options = ["Pending", "Probationary", "Active", "Partial Member", "Full Member"]
                     selected_status = str(selected_member_detail.get("status") or "")
                     new_status = st.selectbox("Status", options=status_options, index=status_options.index(selected_status) if selected_status in status_options else 0, key="chairperson_status")
                     safe_join_date = _normalize_join_date(selected_member_detail.get("join_date"))

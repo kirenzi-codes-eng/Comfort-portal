@@ -25,6 +25,7 @@ PROOF_STATUS_PENDING = "Pending Verification"
 PROOF_STATUS_VERIFIED = "Verified"
 PROOF_STATUS_REJECTED = "Rejected"
 PROOF_STATUS_CLARIFICATION = "Clarification Requested"
+MAX_SUBSCRIPTION_AMOUNT = 20000.0
 
 
 def get_subscription_proof_access_role(user_role: str | None) -> str:
@@ -259,6 +260,37 @@ def has_existing_subscription_proof(member_id: str, subscription_month: int, sub
         fetch=True,
     )
     return bool(rows)
+
+
+def get_member_monthly_subscription_total(member_id: str, subscription_month: int, subscription_year: int) -> float:
+    """Return the current total amount paid or pending for the member in a given month/year."""
+    _ensure_subscription_proof_table()
+    billing_month = date(subscription_year, subscription_month, 1)
+
+    subscription_rows = execute_query(
+        """
+        SELECT COALESCE(SUM(amount_paid), 0) AS total_paid
+        FROM subscriptions
+        WHERE member_id = %s AND billing_month = %s;
+        """,
+        params=(member_id, billing_month),
+        fetch=True,
+    ) or []
+    existing_total = float(subscription_rows[0].get("total_paid", 0) if subscription_rows else 0)
+
+    proof_rows = execute_query(
+        """
+        SELECT COALESCE(SUM(amount_paid), 0) AS total_pending
+        FROM subscription_payment_proofs
+        WHERE member_id = %s AND subscription_month = %s AND subscription_year = %s
+          AND verification_status <> %s;
+        """,
+        params=(member_id, subscription_month, subscription_year, PROOF_STATUS_REJECTED),
+        fetch=True,
+    ) or []
+    pending_total = float(proof_rows[0].get("total_pending", 0) if proof_rows else 0)
+
+    return existing_total + pending_total
 
 
 def update_subscription_proof_verification(proof_id: int | str, verifier: str, new_status: str, verification_comment: str | None = None) -> bool:
@@ -639,7 +671,14 @@ def render_payment_proof_form(member_id: str, member_name: str) -> None:
         col_a, col_b = st.columns(2)
         with col_a:
             subscription_month = st.selectbox("Subscription Month", options=list(range(1, 13)), index=today_in_uganda().month - 1)
-            amount_paid = st.number_input("Amount Paid", min_value=0.0, value=20000.0, step=100.0)
+            amount_paid = st.number_input(
+                "Amount Paid (max UGX 20,000)",
+                min_value=0.0,
+                max_value=MAX_SUBSCRIPTION_AMOUNT,
+                value=MAX_SUBSCRIPTION_AMOUNT,
+                step=100.0,
+                help="Enter a subscription payment amount up to UGX 20,000.",
+            )
         with col_b:
             subscription_year = st.selectbox("Subscription Year", options=list(range(today_in_uganda().year - 1, today_in_uganda().year + 2)), index=1)
             payment_method = st.selectbox(
@@ -664,6 +703,20 @@ def render_payment_proof_form(member_id: str, member_name: str) -> None:
         submitted = st.form_submit_button("Submit Proof", use_container_width=True)
 
     if submitted:
+        if amount_paid > MAX_SUBSCRIPTION_AMOUNT:
+            st.error(f"The maximum allowed subscription payment is UGX {int(MAX_SUBSCRIPTION_AMOUNT):,}.")
+            return
+
+        monthly_total = get_member_monthly_subscription_total(member_id, subscription_month, subscription_year)
+        if monthly_total + amount_paid > MAX_SUBSCRIPTION_AMOUNT:
+            allowed_amount = max(0.0, MAX_SUBSCRIPTION_AMOUNT - monthly_total)
+            st.error(
+                f"This member already has UGX {int(monthly_total):,} recorded or pending for "
+                f"{date(subscription_year, subscription_month, 1).strftime('%B %Y')}. "
+                f"Please submit up to UGX {int(allowed_amount):,} for this month."
+            )
+            return
+
         is_valid, message = validate_subscription_proof_upload(uploaded_file)
         if not is_valid:
             st.error(message)
@@ -1111,22 +1164,40 @@ def treasurer_view(user_role: str):
                         min_value=date(2000, 1, 1),
                         max_value=date(date.today().year, 12, 31),
                     )
-                    amount = st.number_input("Amount Paid (UGX)", min_value=0.0, value=20000.0, step=100.0)
+                    amount = st.number_input(
+                        "Amount Paid (UGX, max 20,000)",
+                        min_value=0.0,
+                        max_value=MAX_SUBSCRIPTION_AMOUNT,
+                        value=MAX_SUBSCRIPTION_AMOUNT,
+                        step=100.0,
+                        help="Post a subscription payment amount up to UGX 20,000.",
+                    )
                     submit_payment = st.form_submit_button("Post Payment")
 
                 if submit_payment:
-                    member_id = member_options[selected]
-                    bm = billing_month.replace(day=1)
-                    try:
-                        execute_query(
-                            "INSERT INTO subscriptions (member_id, billing_month, amount_paid, status) VALUES (%s, %s, %s, %s);",
-                            params=(member_id, bm, amount, "Paid"),
-                            fetch=False,
-                        )
-                        st.toast("Payment recorded.", icon="✅")
-                        check_and_update_member_status(member_id)
-                    except Exception as e:
-                        st.error(f"Failed to record payment: {e}")
+                    if amount > MAX_SUBSCRIPTION_AMOUNT:
+                        st.error(f"The maximum allowed subscription payment is UGX {int(MAX_SUBSCRIPTION_AMOUNT):,}.")
+                    else:
+                        member_id = member_options[selected]
+                        bm = billing_month.replace(day=1)
+                        existing_total = get_member_monthly_subscription_total(member_id, bm.month, bm.year)
+                        if existing_total + amount > MAX_SUBSCRIPTION_AMOUNT:
+                            allowed_amount = max(0.0, MAX_SUBSCRIPTION_AMOUNT - existing_total)
+                            st.error(
+                                f"This member already has UGX {int(existing_total):,} recorded or pending for {bm.strftime('%B %Y')}. "
+                                f"You can only post up to UGX {int(allowed_amount):,} more for this month."
+                            )
+                        else:
+                            try:
+                                execute_query(
+                                    "INSERT INTO subscriptions (member_id, billing_month, amount_paid, status) VALUES (%s, %s, %s, %s);",
+                                    params=(member_id, bm, amount, "Paid"),
+                                    fetch=False,
+                                )
+                                st.toast("Payment recorded.", icon="✅")
+                                check_and_update_member_status(member_id)
+                            except Exception as e:
+                                st.error(f"Failed to record payment: {e}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
         with col2:

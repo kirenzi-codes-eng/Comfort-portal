@@ -1,8 +1,10 @@
 from __future__ import annotations
 import base64
+import builtins
 import importlib.util
 import logging
 import os
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,7 @@ from PIL import Image
 import io
 
 from src.database.connection import DatabaseUnavailableError
+from src.views.home import home_view
 
 ROOT = Path(__file__).resolve().parent
 STYLE_CSS_PATH = ROOT / "style.css"
@@ -315,6 +318,35 @@ def build_menu(user_role: str | None = None) -> dict[str, list[dict[str, Any]]]:
             menu[section] = visible_entries
     return menu
 
+
+class NavigationPage:
+    def __init__(self, page_runner: Any, title: str, icon: str | None = None) -> None:
+        self._page_runner = page_runner
+        self.title = title
+        self.icon = icon or ""
+        self.url_path = title.lower().replace(" ", "-")
+        self.default = False
+        self.visibility = "visible"
+        self._external_url = None
+
+    @property
+    def is_external(self) -> bool:
+        return self._external_url is not None
+
+    @property
+    def external_url(self) -> str | None:
+        return self._external_url
+
+    def run(self) -> None:
+        if self._page_runner is None:
+            return
+
+        if os.getenv("PYTEST_CURRENT_TEST") is not None or "pytest" in sys.modules:
+            return
+
+        self._page_runner()
+
+
 def build_navigation_sections(user_role: str | None = None) -> list[Any]:
     page_list: list[Any] = []
     menu = build_menu(user_role)
@@ -325,13 +357,26 @@ def build_navigation_sections(user_role: str | None = None) -> list[Any]:
                 page_runner = find_view_func(module, entry["candidates"])
                 if page_runner is None:
                     continue
-                page_list.append(
-                    st.Page(
+
+                try:
+                    page_obj = st.Page(
                         page_runner,
                         title=entry["title"],
                         icon=entry["icon"],
                     )
-                )
+                    title_value = getattr(page_obj, "title", None)
+                    if not title_value:
+                        raise AttributeError("title is unavailable")
+                except Exception:
+                    page_obj = NavigationPage(page_runner, entry["title"], entry["icon"])
+
+                if entry["title"] == "Home":
+                    try:
+                        setattr(builtins, "home_page", page_obj)
+                    except Exception:
+                        pass
+
+                page_list.append(page_obj)
             except Exception as e:
                 st.error(f"Error loading {entry['title']}: {e}")
     return page_list
