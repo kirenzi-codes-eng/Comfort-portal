@@ -1675,6 +1675,12 @@ def render_welfare_support_page() -> None:
             with column:
                 _render_stat_card(title, value, subtitle, tone)
 
+        try:
+            requests = _get_welfare_requests_for_role(user_role, user_id)
+        except Exception:
+            logger.exception("Unable to load welfare requests for %s", user_role)
+            requests = []
+
         with st.container(border=True):
             control_cols = st.columns(3)
             with control_cols[0]:
@@ -1701,19 +1707,18 @@ def render_welfare_support_page() -> None:
                     key="welfare_status_filter",
                 )
             with control_cols[2]:
-                category_options = ["All", *sorted({str(r.get("support_category") or "") for r in _get_welfare_requests_for_role(user_role, user_id) if str(r.get("support_category") or "").strip()})]
+                category_options = ["All", *sorted({str(r.get("support_category") or "") for r in requests if str(r.get("support_category") or "").strip()})]
                 category_filter = st.selectbox("Category", options=category_options, key="welfare_category_filter")
 
             second_row = st.columns([1, 1, 1])
             with second_row[0]:
-                year_options = ["All", *sorted({str(r.get("created_at", "") or "")[:4] for r in _get_welfare_requests_for_role(user_role, user_id) if str(r.get("created_at") or "")[:4].isdigit()}, reverse=True)]
+                year_options = ["All", *sorted({str(r.get("created_at", "") or "")[:4] for r in requests if str(r.get("created_at") or "")[:4].isdigit()}, reverse=True)]
                 year_filter = st.selectbox("Year", options=year_options, key="welfare_year_filter")
             with second_row[1]:
                 payment_filter = st.selectbox("Payment Status", options=["All", "Paid", "Pending"], key="welfare_payment_filter")
             with second_row[2]:
                 st.caption("Pagination")
 
-        requests = _get_welfare_requests_for_role(user_role, user_id)
         filtered_requests = []
         for request in requests:
             status_value = str(request.get("status") or "")
@@ -1836,11 +1841,15 @@ def render_welfare_support_page() -> None:
                         request_id = _safe_int(request.get("id"))
                         member_id = str(request.get("member_id") or "")
                         if member_id:
-                            current_account_status = execute_query(
-                                "SELECT status FROM member_welfare_accounts WHERE member_id = %s LIMIT 1;",
-                                params=(member_id,),
-                                fetch=True,
-                            ) or []
+                            try:
+                                current_account_status = execute_query(
+                                    "SELECT status FROM member_welfare_accounts WHERE member_id = %s LIMIT 1;",
+                                    params=(member_id,),
+                                    fetch=True,
+                                ) or []
+                            except Exception:
+                                logger.exception("Unable to load welfare account status for %s", member_id)
+                                current_account_status = []
                             account_status = str((current_account_status[0] or {}).get("status") or "Active") if current_account_status else "Active"
                             if account_status.lower() == "suspended":
                                 if st.button("Reopen welfare account", key=f"unsuspend_welfare_{request_id}"):
