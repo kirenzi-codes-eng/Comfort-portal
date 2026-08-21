@@ -9,9 +9,9 @@ from src.database.connection import execute_query
 
 
 def _safe_rerun() -> None:
-    """Try to trigger a Streamlit rerun; fall back to a session-state toggle."""
+    """Trigger a Streamlit rerun using the current supported API."""
     try:
-        rerun_fn = getattr(st, "experimental_rerun", None)
+        rerun_fn = getattr(st, "rerun", None)
         if callable(rerun_fn):
             rerun_fn()
             return

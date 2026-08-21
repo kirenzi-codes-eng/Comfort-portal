@@ -1,6 +1,7 @@
 import ast
 import io
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -16,7 +17,11 @@ import psycopg2.extras
 import streamlit as st
 from typing import Optional
 
-from src.database.connection import execute_query, get_conn_from_pool
+from src.database.connection import DatabaseUnavailableError, execute_query, get_conn_from_pool
+from src.utils.audit import record_audit_event
+from src.utils.notifications import create_notification
+
+logger = logging.getLogger(__name__)
 
 
 def format_member_id(count: int) -> str:
@@ -76,6 +81,54 @@ def check_password(password: str, hashed: Optional[bytes | str]) -> bool:
         return bcrypt.checkpw(password.encode("utf-8"), hashed_bytes)
     except (ValueError, TypeError):
         return False
+
+
+ALLOWED_LOGIN_STATUSES = {"Probationary", "Partial Member", "Full Member"}
+
+
+def canonicalize_membership_status(status: Optional[object]) -> str:
+    if status is None:
+        return "Pending"
+
+    normalized = str(status).strip().lower().replace("_", " ").replace("-", " ")
+    if not normalized:
+        return "Pending"
+
+    if normalized in {"pending", "due", "open", "incomplete", "new", "awaiting review"}:
+        return "Pending"
+    if normalized in {"probational", "probationary", "probation"}:
+        return "Probationary"
+    if normalized in {"partial", "partial member", "partial members"}:
+        return "Partial Member"
+    if normalized in {"full", "full member", "full member", "full members"}:
+        return "Full Member"
+    if normalized in {"suspended", "suspension"}:
+        return "Suspended"
+    if normalized in {"terminated", "inactive", "inactive member"}:
+        return "Terminated"
+    if normalized in {"rejected", "rejected registration"}:
+        return "Rejected"
+    return str(status).strip().title() or "Pending"
+
+
+def can_login_with_membership_status(status: Optional[object]) -> bool:
+    return canonicalize_membership_status(status) in ALLOWED_LOGIN_STATUSES
+
+
+def get_membership_login_block_message(status: Optional[object]) -> str:
+    status_value = canonicalize_membership_status(status)
+    return {
+        "Pending": "Your membership application is still under review. Please wait for approval by the SACCO administration.",
+        "Rejected": "Your membership application was not approved. Please contact the SACCO office for assistance.",
+        "Suspended": "Your account has been suspended. Please contact the SACCO administration.",
+        "Terminated": "Your membership has been terminated. Access to this account is no longer available.",
+    }.get(status_value, "Your account is not currently eligible to sign in.")
+
+
+def _clear_auth_session_state() -> None:
+    for key in ["logged_in", "user_id", "member_id", "user_name", "user_role", "user_status", "join_date", "_login_in_progress", "remember_me"]:
+        st.session_state.pop(key, None)
+    st.session_state["logged_in"] = False
 
 
 def _remembered_login_path() -> str:
@@ -152,13 +205,24 @@ def _ensure_member_profile_columns() -> None:
             ADD COLUMN IF NOT EXISTS next_of_kin_relationship TEXT,
             ADD COLUMN IF NOT EXISTS next_of_kin_phone TEXT,
             ADD COLUMN IF NOT EXISTS emergency_contact_name TEXT,
-            ADD COLUMN IF NOT EXISTS emergency_contact_phone TEXT;
+            ADD COLUMN IF NOT EXISTS emergency_contact_phone TEXT,
+            ADD COLUMN IF NOT EXISTS previous_membership_status TEXT;
             """,
             params=None,
             fetch=False,
         )
+        execute_query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_email_unique ON members (lower(email));",
+            params=None,
+            fetch=False,
+        )
+    except DatabaseUnavailableError as exc:
+        logger.exception("Database unavailable while preparing member profile columns")
+        st.warning(getattr(exc, "user_friendly_message", "We’re having trouble connecting to the database right now."))
     except Exception as exc:
-        st.warning(f"Unable to prepare member profile fields: {exc}")
+        if "already exists" not in str(exc).lower() and "duplicate" not in str(exc).lower():
+            logger.exception("Unable to prepare member profile columns")
+            st.warning("We’re having trouble connecting to the database right now.")
 
 
 def _save_remembered_identifier(identifier: str) -> None:
@@ -204,7 +268,7 @@ def register_member(
         _ensure_member_profile_columns()
 
         existing = execute_query(
-            "SELECT 1 AS exists_flag FROM members WHERE email = %s LIMIT 1;",
+            "SELECT 1 AS exists_flag FROM members WHERE lower(email) = lower(%s) LIMIT 1;",
             params=(email,),
             fetch=True,
         )
@@ -273,9 +337,35 @@ def register_member(
             ),
             fetch=False,
         )
+        record_audit_event(
+            entity_type="member",
+            entity_id=member_id,
+            action="registered",
+            actor_name=full_name,
+            actor_role="Member",
+            details="New member registration submitted",
+        )
+        create_notification(
+            recipient_type="role",
+            recipient_id="Secretary",
+            recipient_role="Secretary",
+            title="New registration submitted",
+            message=f"A new member registration was submitted by {full_name}.",
+            category="Membership",
+            module_name="Auth",
+            related_record_id=member_id,
+            priority="High",
+        )
         return member_id
-    except Exception as e:
-        st.exception(e)
+    except psycopg2.IntegrityError:
+        return None
+    except DatabaseUnavailableError as exc:
+        logger.exception("Database unavailable while registering member")
+        st.warning(getattr(exc, "user_friendly_message", "We’re having trouble connecting to the database right now."))
+        return None
+    except Exception:
+        logger.exception("Unexpected error while registering member")
+        st.warning("Your request could not be processed right now, but our team is working on it.")
         return None
 
 
@@ -296,8 +386,13 @@ def find_member_by_identifier(identifier: str):
             fetch=True,
         )
         return rows[0] if rows else None
-    except Exception as e:
-        st.exception(e)
+    except DatabaseUnavailableError as exc:
+        logger.exception("Database unavailable while looking up member")
+        st.warning(getattr(exc, "user_friendly_message", "We’re having trouble connecting to the database right now."))
+        return None
+    except Exception:
+        logger.exception("Unexpected error while looking up member")
+        st.warning("Your request could not be processed right now, but our team is working on it.")
         return None
 
 
@@ -529,6 +624,25 @@ def update_member_password(member_id: str, current_password: str, new_password: 
             params=(pw_hash, member_id),
             fetch=False,
         )
+        record_audit_event(
+            entity_type="member",
+            entity_id=member_id,
+            action="password_updated",
+            actor_name=member.get("full_name") or member_id,
+            actor_role=member.get("role") or "Member",
+            details="Member password updated",
+        )
+        create_notification(
+            recipient_type="member",
+            recipient_id=member_id,
+            recipient_role=member.get("role") or "Member",
+            title="Password changed",
+            message="Your password was changed successfully.",
+            category="System",
+            module_name="Auth",
+            related_record_id=member_id,
+            priority="Normal",
+        )
         return True, "Password updated successfully."
     except Exception as exc:
         return False, f"Failed to update password: {exc}"
@@ -615,12 +729,19 @@ def auth_ui():
                         stored_hash = bytes(row["password_hash"]) if isinstance(row["password_hash"], memoryview) else row["password_hash"]
                         try:
                             if check_password(password, stored_hash):
+                                member_status = canonicalize_membership_status(row.get("status"))
+                                if not can_login_with_membership_status(member_status):
+                                    _clear_auth_session_state()
+                                    st.error(get_membership_login_block_message(member_status))
+                                    st.session_state._login_in_progress = False
+                                    st.rerun()
+
                                 st.session_state.logged_in = True
                                 st.session_state.user_id = row["member_id"]
                                 st.session_state.member_id = int(row["id"])
                                 st.session_state.user_name = row["full_name"]
                                 st.session_state.user_role = row["role"]
-                                st.session_state.user_status = row["status"]
+                                st.session_state.user_status = member_status
                                 st.session_state.join_date = row.get("join_date")
                                 st.session_state._login_in_progress = False
                                 if remember_me:
@@ -633,7 +754,7 @@ def auth_ui():
                                 st.toast("Incorrect password.", icon="❌")
                                 st.session_state._login_in_progress = False
                         except Exception as e:
-                            st.exception(e)
+                            st.error(f"Unable to sign in right now: {e}")
                             st.session_state._login_in_progress = False
 
         # REGISTER TAB
@@ -705,10 +826,10 @@ def auth_ui():
                         notes=notes.strip() or None,
                     )
                     if member_id is None:
-                        st.toast("Registration failed: email may already be in use.", icon="❌")
+                        st.warning("An account with this email address already exists. Please sign in using your existing account or use a different email address.")
                     else:
-                        st.toast(f"Account created. Your Member ID is {member_id}", icon="✅")
-                        st.success(f"Registration successful — remember your Member ID: {member_id}")
+                        st.success("Your registration has been submitted successfully. Your application is awaiting review by the SACCO administration. You will be able to sign in once your membership status has been updated.")
+                        st.caption(f"Your Member ID is {member_id}")
 
     with right_col:
         st.image("logo.png", width='stretch')

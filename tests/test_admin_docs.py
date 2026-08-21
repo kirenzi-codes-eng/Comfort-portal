@@ -77,6 +77,13 @@ class BuildMemberProfileUpdateTests(unittest.TestCase):
         self.assertEqual(resolved["national_id"], full_member["national_id"])
         self.assertEqual(resolved["email"], directory_member["email"])
 
+    def test_delete_member_account_uses_deleted_status_and_audit(self):
+        with patch.object(admin_docs, "update_member_status", return_value=True) as update_mock:
+            result = admin_docs.delete_member_account("CBO-001", "chairperson", "Chairperson", "Rule breach")
+
+        self.assertTrue(result)
+        update_mock.assert_called_once_with("CBO-001", "Deleted", "chairperson", "Chairperson", reason="Rule breach")
+
 
 if __name__ == "__main__":
     unittest.main()

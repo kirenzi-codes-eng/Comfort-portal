@@ -15,6 +15,19 @@ from reportlab.pdfgen import canvas
 
 from app import coerce_date_input_value
 from src.database.connection import execute_query
+from src.utils.audit import (
+    build_audit_dashboard_summary,
+    fetch_enriched_audit_events,
+    fetch_recent_audit_events,
+    record_audit_event,
+)
+from src.utils.notifications import (
+    get_notifications_for_user,
+    get_unread_notification_count,
+    mark_all_notifications_read,
+    mark_notification_read,
+)
+from src.utils.reminders import run_reminder_engine
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -105,15 +118,17 @@ def _normalize_join_date(value: Optional[object]) -> Optional[date]:
 
 
 def _rerun_page() -> None:
-    """Safely rerun the current Streamlit page across Streamlit versions."""
+    """Safely rerun the current Streamlit page using the current API."""
     rerun = getattr(st, "rerun", None)
     if callable(rerun):
         rerun()
         return
 
-    experimental_rerun = getattr(st, "experimental_rerun", None)
-    if callable(experimental_rerun):
-        experimental_rerun()
+    try:
+        st.session_state.setdefault("_rerun_trigger", False)
+        st.session_state["_rerun_trigger"] = not st.session_state["_rerun_trigger"]
+    except Exception:
+        return
 
 
 def _render_member_profile_summary(member_record: Optional[Dict]) -> None:
@@ -426,20 +441,101 @@ def build_member_profile_pdf(member_record: Optional[Dict]) -> bytes:
     return buffer.getvalue()
 
 
-def approve_new_registration(member_id: str) -> None:
+def _record_membership_audit_log(member_id: str, old_status: Optional[str], new_status: str, action_performed: str, performed_by: str, admin_role: str, reason: Optional[str] = None) -> None:
+    try:
+        execute_query(
+            """
+            INSERT INTO audit_logs (member_id, old_status, new_status, action_performed, performed_by, admin_role, reason, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
+            """,
+            params=(member_id, old_status, new_status, action_performed, performed_by, admin_role, reason),
+            fetch=False,
+        )
+    except Exception:
+        pass
+
+
+def _clear_member_cache() -> None:
+    for cache_fn in (fetch_member_directory_cached, fetch_member_record_cached):
+        try:
+            cache_fn.clear()
+        except Exception:
+            pass
+
+
+def approve_new_registration(member_id: str, performed_by: str, admin_role: str, reason: Optional[str] = None) -> None:
+    current = fetch_member_record(member_id) or {}
+    old_status = str(current.get("status") or "Pending")
     execute_query(
         "UPDATE members SET status = %s, role = %s, join_date = COALESCE(join_date, CURRENT_DATE) WHERE member_id = %s;",
         params=("Probationary", "Member", member_id),
         fetch=False,
     )
-    try:
-        fetch_member_directory_cached.clear()
-    except Exception:
-        pass
-    try:
-        fetch_member_record_cached.clear()
-    except Exception:
-        pass
+    _record_membership_audit_log(member_id, old_status, "Probationary", "Approve as Probation", performed_by, admin_role, reason)
+    record_audit_event(
+        entity_type="member",
+        entity_id=member_id,
+        action="membership_approved",
+        actor_name=performed_by,
+        actor_role=admin_role,
+        details=reason or "Membership approved as probationary",
+        previous_value=old_status,
+        new_value="Probationary",
+    )
+    create_notification(
+        recipient_type="member",
+        recipient_id=member_id,
+        recipient_role="Member",
+        title="Registration approved",
+        message="Your registration was approved and your membership is now probationary.",
+        category="Membership",
+        module_name="Admin",
+        related_record_id=member_id,
+        priority="High",
+    )
+    _clear_member_cache()
+
+
+def update_member_status(member_id: str, new_status: str, performed_by: str, admin_role: str, reason: Optional[str] = None) -> bool:
+    if not member_id:
+        return False
+    current = fetch_member_record(member_id) or {}
+    old_status = str(current.get("status") or "Pending")
+    execute_query(
+        "UPDATE members SET status = %s, previous_membership_status = COALESCE(previous_membership_status, %s) WHERE member_id = %s;",
+        params=(new_status, old_status, member_id),
+        fetch=False,
+    )
+    _record_membership_audit_log(member_id, old_status, new_status, f"Status update to {new_status}", performed_by, admin_role, reason)
+    record_audit_event(
+        entity_type="member",
+        entity_id=member_id,
+        action="membership_status_updated",
+        actor_name=performed_by,
+        actor_role=admin_role,
+        details=reason or f"Status updated to {new_status}",
+        previous_value=old_status,
+        new_value=new_status,
+    )
+    create_notification(
+        recipient_type="member",
+        recipient_id=member_id,
+        recipient_role="Member",
+        title="Membership status updated",
+        message=f"Your membership status was updated to {new_status}.",
+        category="Membership",
+        module_name="Admin",
+        related_record_id=member_id,
+        priority="High",
+    )
+    _clear_member_cache()
+    return True
+
+
+def delete_member_account(member_id: str, performed_by: str, admin_role: str, reason: Optional[str] = None) -> bool:
+    if not member_id:
+        return False
+    return update_member_status(member_id, "Deleted", performed_by, admin_role, reason=reason)
 
 
 def update_member_profile(
@@ -531,6 +627,19 @@ def _inject_admin_docs_css() -> None:
             .detail-hero-avatar { width: 64px; height: 64px; border-radius: 18px; background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); color: white; font-size: 1.1rem; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
             .detail-hero-name { font-size: 1.15rem; font-weight: 800; color: #0f172a; margin-bottom: 0.2rem; }
             .detail-hero-meta { font-size: 0.9rem; color: #475569; }
+            .metric-card { background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border: 1px solid #e2e8f0; border-radius: 18px; padding: 0.9rem 0.95rem; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.04); }
+            .metric-label { font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; font-weight: 700; margin-bottom: 0.3rem; }
+            .metric-value { font-size: 1.25rem; font-weight: 800; color: #0f172a; }
+            .chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.28rem 0.7rem; font-size: 0.72rem; font-weight: 700; margin-right: 0.35rem; }
+            .chip-approved { background: #ecfdf3; color: #047857; }
+            .chip-rejected { background: #fef2f2; color: #b91c1c; }
+            .chip-pending { background: #fef3c7; color: #b45309; }
+            .chip-warning { background: #eff6ff; color: #1d4ed8; }
+            .chip-critical { background: #fef2f2; color: #b91c1c; }
+            .audit-row { border: 1px solid #e2e8f0; border-radius: 16px; padding: 0.85rem 0.95rem; margin-bottom: 0.7rem; background: #ffffff; }
+            .audit-row-header { display: flex; justify-content: space-between; align-items: center; gap: 0.7rem; margin-bottom: 0.45rem; }
+            .audit-row-title { font-weight: 800; color: #0f172a; }
+            .audit-row-subtitle { font-size: 0.88rem; color: #64748b; }
             .attribute-row { margin-bottom: 0.6rem; }
             .attribute-label { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; font-weight: 700; margin-bottom: 0.2rem; }
             .attribute-value { font-size: 0.95rem; font-weight: 700; color: #0f172a; line-height: 1.45; }
@@ -604,6 +713,288 @@ def _render_directory_rows(members: List[Dict], selected_member_id: Optional[str
 
             if selected_member_id and member_id == selected_member_id:
                 st.caption("Selected for profile review")
+
+
+def _render_membership_action_controls(member: Dict, acting_role: str, acting_user_id: str) -> None:
+    member_id = str(member.get("member_id") or "")
+    current_status = str(member.get("status") or "Pending")
+    current_status_key = current_status.lower()
+
+    if acting_role not in {"Secretary", "Chairperson"}:
+        return
+
+    st.markdown("#### Membership actions")
+    if current_status_key in {"pending", "new"}:
+        if st.button("Approve as Probation", key=f"approve_probation_{member_id}", width="stretch"):
+            if st.dialog("Confirm approval"):
+                pass
+        if st.button("Reject Registration", key=f"reject_registration_{member_id}", width="stretch"):
+            update_member_status(member_id, "Rejected", acting_user_id, acting_role, reason="Rejected by admin")
+            st.success("Membership rejected successfully.")
+            st.rerun()
+    elif current_status_key in {"probationary", "probation", "probation member"}:
+        if st.button("Promote to Partial Member", key=f"promote_partial_{member_id}", width="stretch"):
+            update_member_status(member_id, "Partial Member", acting_user_id, acting_role, reason="Promoted by admin")
+            st.success("Membership promoted successfully.")
+            st.rerun()
+    elif current_status_key in {"partial member", "partial"}:
+        if st.button("Promote to Full Member", key=f"promote_full_{member_id}", width="stretch"):
+            update_member_status(member_id, "Full Member", acting_user_id, acting_role, reason="Promoted by admin")
+            st.success("Membership promoted successfully.")
+            st.rerun()
+    elif current_status_key in {"suspended", "suspension"}:
+        if st.button("Reinstate Member", key=f"reinstate_{member_id}", width="stretch"):
+            previous_status = str(member.get("previous_membership_status") or "Probationary")
+            update_member_status(member_id, previous_status, acting_user_id, acting_role, reason="Reinstated by admin")
+            st.success("Membership reinstated successfully.")
+            st.rerun()
+    elif current_status_key in {"active", "probationary", "partial member", "full member", "full", "partial"}:
+        if st.button("Suspend Member", key=f"suspend_{member_id}", width="stretch"):
+            update_member_status(member_id, "Suspended", acting_user_id, acting_role, reason="Suspended by admin")
+            st.success("Membership suspended successfully.")
+            st.rerun()
+        if st.button("Terminate Membership", key=f"terminate_{member_id}", width="stretch"):
+            update_member_status(member_id, "Terminated", acting_user_id, acting_role, reason="Terminated by admin")
+            st.success("Membership terminated successfully.")
+            st.rerun()
+
+    if acting_role == "Chairperson":
+        st.markdown("#### Chairperson enforcement")
+        if current_status_key not in {"deleted", "terminated"}:
+            if st.button("Delete Account", key=f"delete_account_{member_id}", width="stretch"):
+                delete_member_account(member_id, acting_user_id, acting_role, reason="Account deleted by Chairperson")
+                st.success("Account deleted successfully.")
+                st.rerun()
+
+
+def notifications_center_view() -> None:
+    try:
+        st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+    except Exception:
+        pass
+
+    _inject_admin_docs_css()
+    st.markdown("<div class='admin-shell'>", unsafe_allow_html=True)
+    st.markdown("<h1 class='page-title'>Notifications</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='page-caption'>Review your latest notifications, unread items, and recent system updates.</p>", unsafe_allow_html=True)
+
+    user_role = st.session_state.get("user_role")
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        st.info("You need to be signed in to view notifications.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    unread_count = get_unread_notification_count("member", user_id, recipient_role=user_role)
+    st.metric("Unread", unread_count)
+    if st.button("Mark all as read", width="content"):
+        mark_all_notifications_read("member", user_id, recipient_role=user_role)
+        st.success("All notifications marked as read.")
+        st.rerun()
+
+    notifications = get_notifications_for_user("member", user_id, recipient_role=user_role, limit=100)
+    if not notifications:
+        st.info("No notifications yet.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    for notification in notifications:
+        is_read = bool(notification.get("is_read"))
+        priority = str(notification.get("priority") or "Normal")
+        with st.container(border=True):
+            cols = st.columns([4, 1])
+            with cols[0]:
+                title = str(notification.get("title") or "Notification")
+                body = str(notification.get("message") or "")
+                st.markdown(f"<div style='font-weight:700; color:#0f172a;'>{escape(title)}</div>", unsafe_allow_html=True)
+                st.caption(body)
+                st.caption(f"Category: {escape(str(notification.get('category') or 'System'))} • Module: {escape(str(notification.get('module_name') or '-'))}")
+            with cols[1]:
+                st.caption(f"Priority: {escape(priority)}")
+                if not is_read and st.button("Mark read", key=f"mark_read_{notification.get('id')}", width="stretch"):
+                    mark_notification_read(int(notification.get("id")))
+                    st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def reminder_engine_view() -> None:
+    try:
+        st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+    except Exception:
+        pass
+
+    _inject_admin_docs_css()
+    st.markdown("<div class='admin-shell'>", unsafe_allow_html=True)
+    st.markdown("<h1 class='page-title'>Reminder Engine</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='page-caption'>Run the shared reminder engine to generate scheduled reminders through the existing notification system.</p>", unsafe_allow_html=True)
+
+    if st.button("Run reminder checks", width="content"):
+        results = run_reminder_engine()
+        st.success("Reminder checks completed.")
+        st.json(results)
+
+    st.caption("This engine reuses the shared notification and audit services and prevents duplicate reminders within the configured window.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def audit_center_view() -> None:
+    try:
+        st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+    except Exception:
+        pass
+
+    _inject_admin_docs_css()
+    st.markdown("<div class='admin-shell'>", unsafe_allow_html=True)
+    st.markdown("<h1 class='page-title'>Executive Audit Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='page-caption'>Track executive-level activity across membership, loans, savings, subscriptions, welfare, authentication, and administration using the existing audit log repository.</p>", unsafe_allow_html=True)
+
+    user_role = st.session_state.get("user_role")
+    allowed_roles = {"Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare"}
+    if user_role not in allowed_roles:
+        st.info("You do not have access to the audit center.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    limit = st.selectbox("Display recent entries", options=[10, 25, 50, 100], index=2, key="audit_center_limit")
+    audit_rows = fetch_enriched_audit_events(limit=limit)
+    if not audit_rows:
+        st.info("No audit events have been recorded yet.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    summary = build_audit_dashboard_summary(limit=max(limit, 200))
+    metric_cols = st.columns(6)
+    metric_payload = [
+        ("Today's Activities", summary.get("today_activities", 0)),
+        ("Total Audit Records", summary.get("total_audit_records", 0)),
+        ("New Registrations", summary.get("new_member_registrations", 0)),
+        ("Loans Approved", summary.get("loans_approved_today", 0)),
+        ("Failed Logins", summary.get("failed_login_attempts", 0)),
+        ("Suspended Accounts", summary.get("suspended_accounts", 0)),
+    ]
+    for col, (label, value) in zip(metric_cols, metric_payload):
+        with col:
+            st.markdown(f"<div class='metric-card'><div class='metric-label'>{escape(label)}</div><div class='metric-value'>{escape(str(value))}</div></div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Quick Filters</div>", unsafe_allow_html=True)
+    filter_col_1, filter_col_2, filter_col_3, filter_col_4 = st.columns([1, 1, 1, 1.2], gap="small")
+    with filter_col_1:
+        module_filter = st.selectbox("Module", options=["All", "Membership", "Loans", "Savings", "Subscriptions", "Welfare", "Authentication", "Reports", "Administration", "Notifications", "Reminder Engine", "Audit System"], key="audit_module_filter")
+    with filter_col_2:
+        status_filter = st.selectbox("Status", options=["All", "Approved", "Rejected", "Pending", "Suspended", "Terminated", "Failed", "Updated", "Recorded"], key="audit_status_filter")
+    with filter_col_3:
+        action_filter = st.selectbox("Action", options=["All", "Approved", "Rejected", "Updated", "Recorded", "Login failed", "Member registered", "Account suspended", "Loan approved", "Payment"], key="audit_action_filter")
+    with filter_col_4:
+        search_term = st.text_input("Search", placeholder="Member, loan, ref, officer, remarks", key="audit_search_filter")
+
+    filtered_rows = []
+    for row in audit_rows:
+        entity_type = str(row.get("entity_type") or "").lower()
+        action_text = str(row.get("action") or "").lower()
+        details_text = str(row.get("details") or "").lower()
+        role_text = str(row.get("role") or "").lower()
+        member_name = str(row.get("member_name") or "").lower()
+        member_number = str(row.get("member_number") or "").lower()
+        remarks_text = str(row.get("remarks") or "").lower()
+        entity_id = str(row.get("entity_id") or "").lower()
+        status_text = str(row.get("status") or "").lower()
+        if module_filter != "All":
+            module_key = module_filter.lower()
+            if module_key == "membership" and "member" not in entity_type and "registration" not in action_text:
+                continue
+            if module_key == "loans" and "loan" not in entity_type and "loan" not in action_text:
+                continue
+            if module_key == "savings" and "saving" not in entity_type and "savings" not in action_text:
+                continue
+            if module_key == "subscriptions" and "subscription" not in entity_type and "subscription" not in action_text and "payment" not in action_text:
+                continue
+            if module_key == "welfare" and "welfare" not in entity_type and "welfare" not in action_text:
+                continue
+            if module_key == "authentication" and "login" not in action_text and "auth" not in entity_type:
+                continue
+            if module_key == "reports" and "report" not in entity_type and "report" not in action_text:
+                continue
+            if module_key == "administration" and "admin" not in entity_type and "admin" not in action_text:
+                continue
+            if module_key == "notifications" and "notification" not in entity_type and "notification" not in action_text:
+                continue
+            if module_key == "reminder engine" and "reminder" not in entity_type and "reminder" not in action_text:
+                continue
+            if module_key == "audit system" and "audit" not in entity_type and "audit" not in action_text:
+                continue
+        if status_filter != "All" and status_filter.lower() != status_text:
+            continue
+        if action_filter != "All" and action_filter.lower() not in action_text and action_filter.lower() not in details_text:
+            continue
+        if search_term:
+            needle = search_term.lower()
+            if needle not in " ".join([member_name, member_number, entity_id, action_text, details_text, role_text, remarks_text]):
+                continue
+        filtered_rows.append(row)
+
+    if not filtered_rows:
+        st.info("No matching audit activity found for the selected filters.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    st.markdown("<div class='section-title'>Security Alerts</div>", unsafe_allow_html=True)
+    alerts = []
+    for row in filtered_rows:
+        action_text = str(row.get("action") or "").lower()
+        details_text = str(row.get("details") or "").lower()
+        if "failed" in action_text or "error" in details_text or "suspend" in action_text or "suspended" in details_text:
+            alerts.append(row)
+    if alerts:
+        for alert in alerts[:5]:
+            st.markdown(f"<div class='audit-row'><div class='audit-row-header'><div class='audit-row-title'>{escape(str(alert.get('action') or 'Alert'))}</div><span class='chip chip-critical'>Security Alert</span></div><div class='audit-row-subtitle'>{escape(str(alert.get('remarks') or alert.get('details') or ''))}</div></div>", unsafe_allow_html=True)
+    else:
+        st.caption("No unusual activity detected in the current view.")
+
+    st.markdown("<div class='section-title'>Executive Activity Timeline</div>", unsafe_allow_html=True)
+    for row in filtered_rows[:8]:
+        created_at = row.get("created_at")
+        created_str = created_at.strftime("%Y-%m-%d %H:%M") if created_at is not None and hasattr(created_at, "strftime") else str(created_at or "")
+        st.markdown(f"<div class='audit-row'><div class='audit-row-header'><div class='audit-row-title'>{escape(str(row.get('action') or 'Audit Event'))}</div><span class='chip chip-approved'>{escape(str(row.get('status') or 'Recorded'))}</span></div><div class='audit-row-subtitle'>{escape(created_str)} • {escape(str(row.get('member_name') or '—'))} • {escape(str(row.get('member_number') or '—'))}</div><div class='audit-row-subtitle'>{escape(str(row.get('remarks') or row.get('details') or ''))}</div></div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-title'>Detailed Audit Records</div>", unsafe_allow_html=True)
+    for row in filtered_rows[:20]:
+        created_at = row.get("created_at")
+        created_str = created_at.strftime("%Y-%m-%d %H:%M") if created_at is not None and hasattr(created_at, "strftime") else str(created_at or "")
+        status = str(row.get("status") or "Recorded")
+        chip_class = "chip-approved" if status.lower() == "approved" else "chip-rejected" if status.lower() == "rejected" else "chip-pending" if status.lower() == "pending" else "chip-warning" if status.lower() in {"updated", "recorded"} else "chip-critical"
+        action_text = str(row.get("action") or "Audit Event")
+        entity_type = str(row.get("entity_type") or "Audit")
+        details_text = str(row.get("remarks") or row.get("details") or "—")
+        member_name = str(row.get("member_name") or "—")
+        member_number = str(row.get("member_number") or "—")
+
+        if "subscription" in entity_type.lower() or "proof" in action_text.lower() or "subscription" in action_text.lower():
+            amount_value = str(row.get("current_state") or "—")
+            if amount_value == "—" and "amount" in details_text.lower():
+                amount_value = details_text
+            extra_fields_html = (
+                f"<div class='attribute-row'><span class='attribute-label'>Member Name</span><div class='attribute-value'>{escape(member_name)}</div></div>"
+                f"<div class='attribute-row'><span class='attribute-label'>Member ID</span><div class='attribute-value'>{escape(member_number)}</div></div>"
+                f"<div class='attribute-row'><span class='attribute-label'>Amount Paid</span><div class='attribute-value'>{escape(amount_value)}</div></div>"
+                f"<div class='attribute-row'><span class='attribute-label'>Date</span><div class='attribute-value'>{escape(created_str)}</div></div>"
+            )
+        else:
+            extra_fields_html = (
+                f"<div class='attribute-row'><span class='attribute-label'>Member Number</span><div class='attribute-value'>{escape(member_number)}</div></div>"
+                f"<div class='attribute-row'><span class='attribute-label'>Reference</span><div class='attribute-value'>{escape(str(row.get('entity_id') or '—'))}</div></div>"
+                f"<div class='attribute-row'><span class='attribute-label'>Previous State</span><div class='attribute-value'>{escape(str(row.get('previous_state') or '—'))}</div></div>"
+                f"<div class='attribute-row'><span class='attribute-label'>Current State</span><div class='attribute-value'>{escape(str(row.get('current_state') or '—'))}</div></div>"
+            )
+
+        st.markdown(
+            f"<div class='audit-row'><div class='audit-row-header'><div class='audit-row-title'>{escape(action_text)}</div><span class='chip {chip_class}'>{escape(status)}</span></div><div class='audit-row-subtitle'>{escape(created_str)} • Module: {escape(entity_type)} • Member: {escape(member_name)}</div>{extra_fields_html}<div class='attribute-row'><span class='attribute-label'>Performed By</span><div class='attribute-value'>{escape(str(row.get('actor_name') or row.get('role') or 'System'))}</div></div><div class='attribute-row'><span class='attribute-label'>Role</span><div class='attribute-value'>{escape(str(row.get('role') or 'System'))}</div></div><div class='attribute-row'><span class='attribute-label'>Remarks</span><div class='attribute-value'>{escape(details_text)}</div></div></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def admin_docs_view():
@@ -685,7 +1076,7 @@ def admin_docs_view():
                         st.caption(f"{escape(email)} • {escape(phone)}")
                     with cols[1]:
                         if st.button("Approve", key=f"approve_{member_id}"):
-                            approve_new_registration(member_id)
+                            approve_new_registration(member_id, st.session_state.get("user_id") or "", user_role or "Chairperson")
                             st.toast(f"Approved registration for {member_id}", icon="✅")
                             st.rerun()
         else:
@@ -713,7 +1104,7 @@ def admin_docs_view():
         st.markdown("<div class='surface-card'>", unsafe_allow_html=True)
         st.markdown("<div class='section-title'>Member Profile Summary</div>", unsafe_allow_html=True)
         _render_member_profile_summary(selected_member_detail)
-        action_col_a, action_col_b = st.columns([1, 1], gap="small")
+        action_col_a, action_col_b, action_col_c = st.columns([1, 1, 1], gap="small")
         with action_col_a:
             if st.button("Edit Member Profile", width="stretch", type="primary"):
                 st.session_state["admin_docs_edit_mode"] = True
@@ -728,6 +1119,8 @@ def admin_docs_view():
                 key="admin_docs_download_pdf",
                 width="stretch",
             )
+        with action_col_c:
+            _render_membership_action_controls(selected_member_detail, user_role, st.session_state.get("user_id") or "")
         st.markdown("</div>", unsafe_allow_html=True)
 
         edit_mode = st.session_state.get("admin_docs_edit_mode", False)

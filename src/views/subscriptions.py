@@ -14,8 +14,10 @@ import cloudinary.uploader
 
 from app import coerce_date_input_value
 from src.database.connection import cached_read_query, execute_query
+from src.utils.audit import record_audit_event
 from src.utils.membership import get_membership_status_for_db
-from src.utils.balances import get_effective_member_balance
+from src.utils.notifications import create_notification
+from src.utils.balances import get_effective_member_balance, get_member_balance_breakdown
 from src.utils.timezone import today_in_uganda
 
 
@@ -207,6 +209,25 @@ def save_subscription_proof_record(
             ),
             fetch=True,
         )
+        record_audit_event(
+            entity_type="subscription_proof",
+            entity_id=str(result[0].get("proof_id")) if result else str(member_id),
+            action="proof_submitted",
+            actor_name=member_name,
+            actor_role="Member",
+            details=f"Subscription proof submitted for {subscription_month}/{subscription_year}",
+        )
+        create_notification(
+            recipient_type="role",
+            recipient_id="Treasurer",
+            recipient_role="Treasurer",
+            title="Subscription proof uploaded",
+            message=f"A new subscription proof was uploaded by {member_name}.",
+            category="Subscriptions",
+            module_name="Subscriptions",
+            related_record_id=str(result[0].get("proof_id")) if result else str(member_id),
+            priority="High",
+        )
         return result[0] if result else None
     except Exception:
         return None
@@ -266,14 +287,19 @@ def get_member_monthly_subscription_total(member_id: str, subscription_month: in
     """Return the current total amount paid or pending for the member in a given month/year."""
     _ensure_subscription_proof_table()
     billing_month = date(subscription_year, subscription_month, 1)
+    next_month = date(
+        subscription_year + (subscription_month == 12),
+        1 if subscription_month == 12 else subscription_month + 1,
+        1,
+    )
 
     subscription_rows = execute_query(
         """
         SELECT COALESCE(SUM(amount_paid), 0) AS total_paid
         FROM subscriptions
-        WHERE member_id = %s AND billing_month = %s;
+        WHERE member_id = %s AND billing_month >= %s AND billing_month < %s;
         """,
-        params=(member_id, billing_month),
+        params=(member_id, billing_month, next_month),
         fetch=True,
     ) or []
     existing_total = float(subscription_rows[0].get("total_paid", 0) if subscription_rows else 0)
@@ -297,6 +323,20 @@ def update_subscription_proof_verification(proof_id: int | str, verifier: str, n
     """Update verification outcome and audit metadata."""
     _ensure_subscription_proof_table()
     try:
+        proof_rows = execute_query(
+            """
+            SELECT member_id, subscription_month, subscription_year, amount_paid, verification_status
+            FROM subscription_payment_proofs
+            WHERE proof_id = %s;
+            """,
+            params=(proof_id,),
+            fetch=True,
+        ) or []
+        if not proof_rows:
+            return False
+
+        proof = proof_rows[0]
+        was_verified = proof.get("verification_status") == PROOF_STATUS_VERIFIED
         execute_query(
             """
             UPDATE subscription_payment_proofs
@@ -308,6 +348,42 @@ def update_subscription_proof_verification(proof_id: int | str, verifier: str, n
             """,
             params=(new_status, verifier, datetime.utcnow(), verification_comment, proof_id),
             fetch=False,
+        )
+        if new_status == PROOF_STATUS_VERIFIED and not was_verified:
+            billing_month = date(int(proof["subscription_year"]), int(proof["subscription_month"]), 1)
+            execute_query(
+                """
+                INSERT INTO subscriptions (member_id, billing_month, amount_paid, status)
+                VALUES (%s, %s, %s, 'Paid');
+                """,
+                params=(
+                    proof["member_id"],
+                    billing_month,
+                    proof["amount_paid"],
+                ),
+                fetch=False,
+            )
+            check_and_update_member_status(str(proof["member_id"]))
+        record_audit_event(
+            entity_type="subscription_proof",
+            entity_id=str(proof_id),
+            action="proof_verified",
+            actor_name=verifier,
+            actor_role="Treasurer",
+            details=f"Verification status updated to {new_status}",
+            previous_value=None,
+            new_value=new_status,
+        )
+        create_notification(
+            recipient_type="member",
+            recipient_id=str(proof_id),
+            recipient_role="Member",
+            title="Subscription proof reviewed",
+            message=f"Your subscription proof was reviewed and marked as {new_status}.",
+            category="Subscriptions",
+            module_name="Subscriptions",
+            related_record_id=str(proof_id),
+            priority="Normal",
         )
         return True
     except Exception:
@@ -691,7 +767,7 @@ def render_payment_proof_form(member_id: str, member_name: str) -> None:
         if uploaded_file is not None:
             st.caption("Uploaded preview")
             if getattr(uploaded_file, "type", "").startswith("image/"):
-                st.image(uploaded_file, use_container_width=True)
+                st.image(uploaded_file, width="stretch")
             else:
                 st.download_button(
                     label="Preview PDF receipt",
@@ -700,7 +776,7 @@ def render_payment_proof_form(member_id: str, member_name: str) -> None:
                     mime="application/pdf",
                 )
 
-        submitted = st.form_submit_button("Submit Proof", use_container_width=True)
+        submitted = st.form_submit_button("Submit Proof", width="stretch")
 
     if submitted:
         if amount_paid > MAX_SUBSCRIPTION_AMOUNT:
@@ -782,7 +858,7 @@ def render_member_payment_history(member_id: str, member_name: str) -> None:
                 if proof_url.lower().endswith(".pdf"):
                     st.link_button("View PDF", proof_url)
                 else:
-                    st.image(proof_url, use_container_width=True)
+                    st.image(proof_url, width="stretch")
             st.caption(f"Amount: UGX {int(float(proof.get('amount_paid') or 0)):,} • Method: {proof.get('payment_method')}")
             if proof.get("transaction_reference"):
                 st.caption(f"Reference: {proof.get('transaction_reference')}")
@@ -989,6 +1065,7 @@ def member_view(member_id: str, show_proof_section: bool = True, user_role: str 
         fetch=True,
     )
     effective_balance = get_effective_member_balance(member_id)
+    balance_breakdown = get_member_balance_breakdown(member_id)
 
     payments_by_month = {}
     status_by_month = {}
@@ -1035,6 +1112,7 @@ def member_view(member_id: str, show_proof_section: bool = True, user_role: str 
             <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
                 <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6C757D; font-weight:600;">My Subscriptions</div>
                 <div style="font-size:1.35rem; font-weight:700; color:#0066FF; margin-top:4px;">UGX {int(round(effective_balance)):,}</div>
+                <div style="font-size:0.78rem; color:#64748B; margin-top:6px;">Includes welfare reserve UGX {int(round(balance_breakdown['welfare_balance'])):,} and savings balance UGX {int(round(balance_breakdown['savings_balance'])):,}</div>
             </div>
             <div style="flex:1; min-width:220px; background:#ffffff; border:1px solid #E9ECEF; border-radius:16px; padding:12px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
                 <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6C757D; font-weight:600;">Arrears</div>

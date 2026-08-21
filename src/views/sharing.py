@@ -10,6 +10,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 from src.database.connection import execute_query
+from src.utils.balances import get_member_balance_breakdown
 from src.views.home import parse_db_datetime
 
 
@@ -483,12 +484,12 @@ def render_sharing_header() -> None:
     )
 
 
-def render_allocation_profile_blocks(total_savings: float, withdrawable_cash: float, reserve_shortfall: float) -> None:
+def render_allocation_profile_blocks(total_savings: float, withdrawable_cash: float, reserve_shortfall: float, welfare_balance: float = 0.0, savings_balance: float = 0.0) -> None:
     profiles = [
         {
             "variant": "soft-blue",
             "title": "Savings Balance",
-            "copy": "Your total savings in the fund.",
+            "copy": f"Includes welfare reserve UGX {welfare_balance:,.0f} and savings balance UGX {savings_balance:,.0f}.",
             "value": f"UGX {total_savings:,.0f}",
             "status": "Good" if total_savings >= 100000 else "Needs more",
         },
@@ -600,6 +601,7 @@ def member_view(member_id: str):
     if total_interest > 0:
         member_rebate_share = (member_interest / total_interest) * member_rebate_pool
 
+    balance_breakdown = get_member_balance_breakdown(member_id)
     reserve = 100000.0
     withdrawable_cash = max(total_savings - reserve, 0.0)
     reserve_shortfall = max(reserve - total_savings, 0.0)
@@ -634,7 +636,13 @@ def member_view(member_id: str):
             unsafe_allow_html=True,
         )
 
-    render_allocation_profile_blocks(total_savings, withdrawable_cash, reserve_shortfall)
+    render_allocation_profile_blocks(
+        total_savings,
+        withdrawable_cash,
+        reserve_shortfall,
+        welfare_balance=balance_breakdown.get("welfare_balance", 0.0),
+        savings_balance=balance_breakdown.get("savings_balance", 0.0),
+    )
 
     st.markdown(
         f"""

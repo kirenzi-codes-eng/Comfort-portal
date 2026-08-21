@@ -1,0 +1,19 @@
+43:     create_app_static_serving_routes,
+60:     create_streamlit_static_assets_routes,
+71:     from starlette.routing import BaseRoute
+101: def create_streamlit_routes(runtime: Runtime) -> list[BaseRoute]:
+115:     list[BaseRoute]
+151:         routes.extend(create_app_static_serving_routes(main_script_path, base_url))
+159:         routes.extend(create_streamlit_static_assets_routes(base_url=base_url))
+208: def create_starlette_app(runtime: Runtime) -> Starlette:
+241:     routes = create_streamlit_routes(runtime)
+283:     routes : Sequence[BaseRoute] | None
+338:     >>> from starlette.routing import Route
+345:     >>> app = App("main.py", routes=[Route("/health", health)])
+395:         routes: Sequence[BaseRoute] | None = None,
+447:         # read by _build_starlette_app -> create_streamlit_routes BEFORE the
+471:                             f"Route '{path}' conflicts with reserved Streamlit route "
+499:         Mount st.App on FastAPI:
+667:         streamlit_routes = create_streamlit_routes(self._runtime)
+705:         # This handles the common pattern: Mount("/st", App("main.py"))
+797: __all__ = ["App", "create_starlette_app"]

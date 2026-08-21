@@ -2,17 +2,50 @@ import contextlib
 import logging
 import os
 import socket
-from typing import Any, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Generator, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import streamlit as st
 
 
+# ===== Custom Exception Classes for Error Categorization =====
+
 class DatabaseUnavailableError(Exception):
-    """Raised when the database connection cannot be established or acquired from the pool."""
-    pass
+    """Base exception for database unavailability. Never expose to users directly."""
+    
+    def __init__(self, message: str, is_network_error: bool = False, is_temporary: bool = True):
+        super().__init__(message)
+        self.is_network_error = is_network_error
+        self.is_temporary = is_temporary
+        self.user_friendly_message = self._build_user_message()
+    
+    def _build_user_message(self) -> str:
+        """Build a user-friendly message based on error type."""
+        if self.is_network_error:
+            return (
+                "We're having trouble reaching the database server. Please check your internet connection and try again later."
+            )
+        elif self.is_temporary:
+            return (
+                "We're having trouble connecting to the database. Please try again later. "
+                "We're temporarily unable to connect to our secure server. "
+                "This is usually caused by a temporary internet or server connection issue."
+            )
+        else:
+            return (
+                "We encountered an unexpected issue while connecting to our server. Please try again. "
+                "If this continues, please contact our support team."
+            )
+
+
+class NetworkConnectionError(DatabaseUnavailableError):
+    """Raised when network connectivity issues prevent database connection."""
+    
+    def __init__(self, message: str = "Network connection error"):
+        super().__init__(message, is_network_error=True, is_temporary=True)
 
 
 logger = logging.getLogger(__name__)
@@ -72,25 +105,30 @@ def _resolve_db_dsn() -> str:
             parsed = urlparse(normalized_dsn)
             host = parsed.hostname
             if not host:
+                logger.error("Database configuration error: unable to resolve hostname from DSN")
                 raise DatabaseUnavailableError(
-                    "Unable to resolve the database hostname. Check Neon pooler URL and secrets configuration."
+                    "Database configuration error",
+                    is_network_error=False,
+                    is_temporary=False
                 )
             socket.gethostbyname(host)
             return normalized_dsn
         except socket.gaierror as exc:
             logger.error(
-                "Database hostname could not be resolved for %s. Check Neon pooler URL and secrets configuration.",
+                "Network error: database hostname could not be resolved for %s (DNS failure)",
                 host or "<unknown>",
             )
-            raise DatabaseUnavailableError(
-                "Unable to resolve the database hostname. Check Neon pooler URL and secrets configuration."
+            raise NetworkConnectionError(
+                f"DNS resolution failed for database host"
             ) from exc
         except DatabaseUnavailableError:
             raise
         except Exception as exc:
-            logger.error("Unable to validate database connection settings: %s", exc)
+            logger.exception("Unexpected error while validating database connection settings")
             raise DatabaseUnavailableError(
-                "Unable to resolve the database hostname. Check Neon pooler URL and secrets configuration."
+                "Unexpected database configuration error",
+                is_network_error=False,
+                is_temporary=False
             ) from exc
 
     host = os.getenv("DB_HOST") or ""
@@ -130,58 +168,107 @@ def init_db_pool(
     maxconn: int = 5,
 ):
     """
-    Create and reuse one PostgreSQL connection for the entire Streamlit app.
+    Create and reuse a PostgreSQL connection pool for the Streamlit app.
+    Retries up to 3 times on transient errors before raising.
     """
 
     last_error = None
     for attempt in range(1, 4):
         try:
             dsn = _resolve_db_dsn()
-            conn = psycopg2.connect(
-                dsn,
-                cursor_factory=psycopg2.extras.RealDictCursor,
+            pool = psycopg2.pool.SimpleConnectionPool(
+                minconn=minconn,
+                maxconn=maxconn,
+                dsn=dsn,
                 connect_timeout=10,
                 sslmode="require",
             )
-            conn.autocommit = False
-            return conn
+            logger.info("Database connection pool initialized successfully")
+            return pool
         except socket.gaierror as exc:
             last_error = exc
-            logger.warning(
-                "DNS resolution failed while creating the database connection (attempt %s/3): %s",
+            is_last_attempt = attempt == 3
+            log_level = logging.ERROR if is_last_attempt else logging.WARNING
+            logger.log(
+                log_level,
+                "Network error: DNS resolution failed (attempt %s/3). Retrying...",
                 attempt,
+            )
+            if is_last_attempt:
+                raise NetworkConnectionError(
+                    "Unable to reach the database server. Please check your internet connection."
+                ) from exc
+        except (psycopg2.OperationalError, psycopg2.DatabaseError) as exc:
+            last_error = exc
+            is_last_attempt = attempt == 3
+            log_level = logging.ERROR if is_last_attempt else logging.WARNING
+            error_msg = str(exc).lower()
+
+            is_likely_temporary = any(
+                keyword in error_msg
+                for keyword in [
+                    "timeout",
+                    "connection refused",
+                    "could not translate",
+                    "server",
+                    "unavailable",
+                    "pool",
+                ]
+            )
+
+            logger.log(
+                log_level,
+                "Database connection error (attempt %s/3, temporary=%s): %s",
+                attempt,
+                is_likely_temporary,
                 exc,
             )
-            if attempt == 3:
+
+            if is_last_attempt:
                 raise DatabaseUnavailableError(
-                    "Unable to resolve the database hostname. Check Neon pooler URL and secrets configuration."
+                    "Unable to connect to the database server",
+                    is_network_error=False,
+                    is_temporary=is_likely_temporary,
                 ) from exc
         except Exception as exc:
             last_error = exc
-            logger.exception("Unable to create database connection (attempt %s/3).", attempt)
-            if attempt == 3:
+            is_last_attempt = attempt == 3
+            log_level = logging.ERROR if is_last_attempt else logging.WARNING
+            logger.log(
+                log_level,
+                "Unexpected error while creating database connection pool (attempt %s/3): %s",
+                attempt,
+                exc,
+            )
+            if is_last_attempt:
                 raise DatabaseUnavailableError(
-                    "Unable to connect to the database. Check Neon pooler URL and secrets configuration."
+                    "Unexpected error connecting to database",
+                    is_network_error=False,
+                    is_temporary=False,
                 ) from exc
 
     if last_error:
         raise DatabaseUnavailableError(
-            "Unable to connect to the database. Check Neon pooler URL and secrets configuration."
+            "Unable to establish database connection after multiple attempts",
+            is_network_error=False,
+            is_temporary=True,
         ) from last_error
 
     raise DatabaseUnavailableError(
-        "Unable to connect to the database. Check Neon pooler URL and secrets configuration."
+        "Unable to establish database connection",
+        is_network_error=False,
+        is_temporary=True,
     )
 
 
 def clear_cached_connection() -> None:
-    """Clear the cached psycopg2 connection so a fresh connection can be created."""
+    """Clear the cached connection pool so a fresh pool can be created."""
 
     try:
         if hasattr(init_db_pool, "clear"):
             init_db_pool.clear()
     except Exception:
-        logger.exception("Unable to clear cached database connection.")
+        logger.exception("Unable to clear cached database connection pool.")
 
 
 def _normalize_params(
@@ -209,26 +296,58 @@ def _is_connection_usable(conn) -> bool:
         return False
 
 
+def _raise_friendly_database_error(exc: Exception, *, is_temporary: bool = True) -> None:
+    logger.error("Database operation failed: %s", exc, exc_info=True)
+    raise DatabaseUnavailableError(
+        "We're having trouble connecting to the database. Please try again later.",
+        is_network_error=False,
+        is_temporary=is_temporary,
+    ) from exc
+
+
 @contextlib.contextmanager
-def get_conn_from_pool() -> Iterator[psycopg2.extensions.connection]:
+def get_conn_from_pool() -> Generator[psycopg2.extensions.connection, None, None]:
     """
-    Yield the shared cached database connection.
+    Yield a connection from the shared cached pool and always return it to the pool.
     """
 
+    pool = init_db_pool()
     conn: Optional[psycopg2.extensions.connection] = None
     try:
-        conn = init_db_pool()
+        conn = pool.getconn()
+        if conn is None:
+            raise DatabaseUnavailableError(
+                "We're having trouble connecting to the database. Please try again later.",
+                is_network_error=False,
+                is_temporary=True,
+            )
         if not _is_connection_usable(conn):
-            logger.warning("Cached connection is unavailable or invalid. Rebuilding it.")
+            logger.warning("Cached connection is unavailable or invalid. Rebuilding the pool.")
+            try:
+                pool.putconn(conn, close=True)
+            except Exception:
+                logger.error("Failed to discard invalid database connection from pool.", exc_info=True)
             clear_cached_connection()
-            conn = init_db_pool()
+            pool = init_db_pool()
+            conn = pool.getconn()
+            if conn is None:
+                raise DatabaseUnavailableError(
+                    "We're having trouble connecting to the database. Please try again later.",
+                    is_network_error=False,
+                    is_temporary=True,
+                )
+
         yield conn
     finally:
-        if conn is not None and not conn.closed:
+        if conn is not None:
             try:
                 conn.rollback()
             except Exception:
-                logger.exception("Failed to rollback database connection.")
+                logger.error("Failed to rollback database connection.", exc_info=True)
+            try:
+                pool.putconn(conn)
+            except Exception:
+                logger.error("Failed to return database connection to pool.", exc_info=True)
 
 
 def _execute_on_connection(
@@ -267,6 +386,11 @@ def execute_query(
     """
     Execute SQL safely using the shared cached connection.
     Retries up to three times on transient connection failures.
+    
+    Raises:
+        DatabaseUnavailableError: If unable to execute query after 3 retries.
+                                  Contains categorization info (network, temporary, unexpected).
+        Never exposes raw SQL errors or internal config to calling code.
     """
 
     last_error = None
@@ -290,44 +414,81 @@ def execute_query(
                     psycopg2.OperationalError,
                     psycopg2.DatabaseError,
                 ) as exc:
-                    logger.warning(
-                        "Transient database error during query execution (attempt %s/3): %s",
+                    error_msg = str(exc).lower()
+                    is_likely_temporary = any(
+                        keyword in error_msg
+                        for keyword in [
+                            "timeout",
+                            "connection refused",
+                            "idle",
+                            "statement timeout",
+                            "pool",
+                            "server",
+                        ]
+                    )
+
+                    is_last_attempt = attempt == 3
+                    logger.error(
+                        "Transient database error during query (attempt %s/3, temp=%s): %s",
                         attempt,
+                        is_likely_temporary,
                         exc,
+                        exc_info=True,
                     )
                     last_error = exc
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
                     clear_cached_connection()
                     if attempt == 3:
-                        raise
+                        _raise_friendly_database_error(exc, is_temporary=is_likely_temporary)
                     continue
         except (
             psycopg2.InterfaceError,
             psycopg2.OperationalError,
             psycopg2.DatabaseError,
-            DatabaseUnavailableError,
         ) as exc:
-            logger.warning(
-                "Transient database error while acquiring connection (attempt %s/3): %s",
+            error_msg = str(exc).lower()
+            is_likely_temporary = any(keyword in error_msg for keyword in [
+                "timeout", "connection refused", "idle", "pool", "server"
+            ])
+
+            logger.error(
+                "Database connection error during query (attempt %s/3, temp=%s): %s",
                 attempt,
+                is_likely_temporary,
                 exc,
+                exc_info=True,
             )
             last_error = exc
             clear_cached_connection()
             if attempt == 3:
-                raise
+                _raise_friendly_database_error(exc, is_temporary=is_likely_temporary)
             continue
-        except Exception:
-            logger.exception("Database query failed.")
+        except DatabaseUnavailableError:
             raise
+        except Exception as exc:
+            logger.error(
+                "Unexpected error during database query (attempt %s/3): %s",
+                attempt,
+                exc,
+                exc_info=True,
+            )
+            last_error = exc
+            clear_cached_connection()
+            if attempt == 3:
+                _raise_friendly_database_error(exc, is_temporary=False)
+            continue
 
     if last_error:
-        raise last_error
+        raise DatabaseUnavailableError(
+            "Unable to complete database operation after multiple attempts",
+            is_network_error=False,
+            is_temporary=True
+        ) from last_error
 
-    return None
+    raise DatabaseUnavailableError(
+        "Unable to complete database operation",
+        is_network_error=False,
+        is_temporary=True
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -370,14 +531,14 @@ def clear_query_cache():
 
 def close_pool():
     """
-    Close the cached connection.
+    Close all cached database connections.
     """
 
     try:
-        conn = init_db_pool()
-        if conn is not None and not conn.closed:
-            conn.close()
+        pool = init_db_pool()
+        if pool is not None and not getattr(pool, "closed", False):
+            pool.closeall()
     except Exception:
-        logger.exception("Failed closing database connection.")
+        logger.error("Failed closing database connection pool.", exc_info=True)
 
     clear_cached_connection()

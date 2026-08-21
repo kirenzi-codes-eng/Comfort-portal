@@ -1,9 +1,10 @@
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 from src.views.home import calculate_effective_loan_balance, get_financial_metrics_cached, safe_execute_query
 from src.views.loans import (
+    approve_loan,
     create_historical_loan_record,
     get_loan_interest_schedule,
     months_between,
@@ -61,26 +62,64 @@ class LoanBalanceTests(unittest.TestCase):
         self.assertAlmostEqual(updates[0][0], 100.0)
         self.assertAlmostEqual(updates[0][1], 1100.0)
 
+    def test_approve_loan_triggers_first_interest_charge(self):
+        execute_calls = []
+
+        def fake_execute(query, params=None, fetch=False):
+            execute_calls.append((query, params, fetch))
+            return None
+
+        with patch("src.views.loans.execute_query", side_effect=fake_execute), \
+             patch("src.views.loans.update_interest_accumulation") as mock_update:
+            result = approve_loan(101, "Treasurer")
+
+        self.assertTrue(result)
+        self.assertEqual(len(execute_calls), 1)
+        self.assertIn("UPDATE loans SET status = 'Approved'", execute_calls[0][0])
+        self.assertFalse(execute_calls[0][2])
+        mock_update.assert_called_once()
+
     def test_months_between_counts_partial_months_for_daily_interest(self):
         self.assertAlmostEqual(months_between(datetime(2026, 5, 11), datetime(2026, 7, 14)), 2 + (3 / 31), places=4)
 
-    def test_grace_period_defers_interest_until_ten_days_after_start(self):
+    def test_interest_applies_immediately_on_loan_issuance(self):
         start_date = datetime(2026, 5, 11, 9, 0)
-        reference_date = datetime(2026, 5, 20, 8, 0)
-        self.assertFalse(should_apply_interest_for_loan(start_date, reference_date, None, None))
+        reference_date = datetime(2026, 5, 11, 9, 0)
+        self.assertTrue(should_apply_interest_for_loan(start_date, reference_date, None, None))
 
-    def test_payment_triggers_immediate_interest_after_grace_period(self):
+    def test_first_due_date_grace_delays_second_interest_after_issuance(self):
         start_date = datetime(2026, 5, 11, 9, 0)
-        reference_date = datetime(2026, 5, 21, 8, 0)
-        last_interest_date = datetime(2026, 5, 20, 8, 0)
-        last_payment_date = datetime(2026, 5, 21, 8, 0)
-        self.assertTrue(should_apply_interest_for_loan(start_date, reference_date, last_interest_date, last_payment_date))
+        last_interest_date = datetime(2026, 5, 11, 9, 0)
+        reference_date_before_grace = datetime(2026, 6, 19, 9, 0)
+        reference_date_after_grace = datetime(2026, 6, 21, 9, 0)
+        self.assertFalse(should_apply_interest_for_loan(start_date, reference_date_before_grace, last_interest_date, None))
+        self.assertTrue(should_apply_interest_for_loan(start_date, reference_date_after_grace, last_interest_date, None))
 
-    def test_get_loan_interest_schedule_reports_grace_and_next_interest_dates(self):
+    def test_payment_after_due_before_grace_triggers_immediate_interest(self):
+        start_date = datetime(2026, 5, 11, 9, 0)
+        last_interest_date = datetime(2026, 5, 11, 9, 0)
+        last_payment_date = datetime(2026, 6, 15, 9, 0)
+        self.assertTrue(should_apply_interest_for_loan(start_date, last_payment_date, last_interest_date, last_payment_date))
+
+    def test_payment_before_next_due_still_waits_until_grace_end(self):
+        start_date = datetime(2026, 5, 11, 9, 0)
+        last_interest_date = datetime(2026, 6, 20, 9, 0)
+        last_payment_date = datetime(2026, 6, 25, 9, 0)
+        self.assertFalse(should_apply_interest_for_loan(start_date, datetime(2026, 7, 19, 9, 0), last_interest_date, last_payment_date))
+        self.assertFalse(should_apply_interest_for_loan(start_date, datetime(2026, 7, 20, 9, 0), last_interest_date, last_payment_date))
+        self.assertFalse(should_apply_interest_for_loan(start_date, datetime(2026, 7, 21, 9, 0), last_interest_date, last_payment_date))
+
+    def test_payment_during_grace_triggers_immediate_interest(self):
+        start_date = datetime(2026, 5, 11, 9, 0)
+        last_interest_date = datetime(2026, 6, 20, 9, 0)
+        last_payment_date = datetime(2026, 7, 22, 9, 0)
+        self.assertTrue(should_apply_interest_for_loan(start_date, datetime(2026, 7, 22, 9, 0), last_interest_date, last_payment_date))
+
+    def test_get_loan_interest_schedule_reports_immediate_interest_and_grace_end_after_first_due_date(self):
         start_date = datetime(2026, 5, 11, 9, 0)
         next_due, grace_end = get_loan_interest_schedule(start_date, None, None, None)
-        self.assertEqual(next_due, date(2026, 5, 21))
-        self.assertEqual(grace_end, date(2026, 5, 21))
+        self.assertEqual(next_due, date(2026, 5, 11))
+        self.assertEqual(grace_end, date(2026, 6, 20))
 
     def test_create_historical_loan_record_inserts_and_backfills_interest(self):
         insert_calls = []

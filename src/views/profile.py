@@ -5,6 +5,10 @@ from datetime import date, datetime
 
 from app import coerce_date_input_value
 from src.components.auth import find_member_by_identifier, get_avatar, update_member_avatar, update_member_password
+from src.utils.notifications import (
+    get_member_notification_preferences,
+    update_member_notification_preferences,
+)
 from src.views.admin_docs import ensure_member_profile_columns, update_member_profile
 
 
@@ -135,6 +139,10 @@ def profile_view() -> None:
     avatar_url = get_avatar(user_id, st.session_state.get("user_name"))
     date_of_birth = _normalize_profile_date(member.get("date_of_birth"))
     age = _calculate_age(date_of_birth)
+    notification_preferences = get_member_notification_preferences(user_id)
+
+    if "notification_preferences" not in st.session_state:
+        st.session_state["notification_preferences"] = notification_preferences
 
     if "profile_last_submitted" not in st.session_state and member:
         st.session_state["profile_last_submitted"] = {
@@ -200,6 +208,56 @@ def profile_view() -> None:
                     """,
                     unsafe_allow_html=True,
                 )
+
+            notification_preferences = st.session_state.get("notification_preferences", {})
+            with st.expander("Notification Preferences", expanded=False):
+                st.checkbox(
+                    "Enable push notifications",
+                    value=bool(notification_preferences.get("push_enabled", True)),
+                    key="pref_push_enabled",
+                )
+                st.checkbox(
+                    "Enable email alerts",
+                    value=bool(notification_preferences.get("email_enabled", False)),
+                    key="pref_email_enabled",
+                )
+                st.checkbox(
+                    "Enable SMS alerts",
+                    value=bool(notification_preferences.get("sms_enabled", False)),
+                    key="pref_sms_enabled",
+                )
+                st.checkbox(
+                    "Receive reminder notifications",
+                    value=bool(notification_preferences.get("reminders_enabled", True)),
+                    key="pref_reminders_enabled",
+                )
+                st.checkbox(
+                    "Receive broadcast updates",
+                    value=bool(notification_preferences.get("broadcasts_enabled", True)),
+                    key="pref_broadcasts_enabled",
+                )
+                if st.button("Save notification preferences", key="save_notification_prefs", width="stretch"):
+                    saved = update_member_notification_preferences(
+                        user_id,
+                        {
+                            "push_enabled": st.session_state.get("pref_push_enabled", True),
+                            "email_enabled": st.session_state.get("pref_email_enabled", False),
+                            "sms_enabled": st.session_state.get("pref_sms_enabled", False),
+                            "reminders_enabled": st.session_state.get("pref_reminders_enabled", True),
+                            "broadcasts_enabled": st.session_state.get("pref_broadcasts_enabled", True),
+                        },
+                    )
+                    if saved:
+                        st.success("Notification preferences saved.")
+                        st.session_state["notification_preferences"] = {
+                            "push_enabled": st.session_state.get("pref_push_enabled", True),
+                            "email_enabled": st.session_state.get("pref_email_enabled", False),
+                            "sms_enabled": st.session_state.get("pref_sms_enabled", False),
+                            "reminders_enabled": st.session_state.get("pref_reminders_enabled", True),
+                            "broadcasts_enabled": st.session_state.get("pref_broadcasts_enabled", True),
+                        }
+                    else:
+                        st.error("Unable to save notification preferences at this time.")
 
             if is_regular_member and not edit_mode:
                 if st.button("Edit Profile Details", key="profile_edit_toggle", width="stretch"):

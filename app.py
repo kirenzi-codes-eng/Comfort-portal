@@ -14,6 +14,8 @@ import io
 
 from src.database.connection import DatabaseUnavailableError
 from src.views.home import home_view
+from src.utils.pwa import get_logo_url
+from src.utils.reminder_scheduler import start_periodic_reminder_worker
 
 ROOT = Path(__file__).resolve().parent
 STYLE_CSS_PATH = ROOT / "style.css"
@@ -23,6 +25,8 @@ APP_SHORT_NAME = "Comfort Portal"
 APP_THEME_COLOR = "#2563eb"
 
 SRC = ROOT / "src"
+
+start_periodic_reminder_worker(interval_minutes=15)
 
 
 def load_css() -> None:
@@ -91,14 +95,19 @@ try:
     )
 
     if _logo_data_uri is not None:
+        logo_url = get_logo_url()
         st.markdown(
             f"""
-            <link rel="apple-touch-icon" sizes="180x180" href="{_logo_data_uri}">
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+            <meta name="theme-color" content="{APP_THEME_COLOR}">
+            <meta name="apple-mobile-web-app-capable" content="yes">
+            <meta name="apple-mobile-web-app-status-bar-style" content="default">
             <meta name="apple-mobile-web-app-title" content="{APP_NAME}">
             <meta name="application-name" content="{APP_NAME}">
-            <meta name="theme-color" content="{APP_THEME_COLOR}">
+            <meta name="mobile-web-app-capable" content="yes">
             <meta name="msapplication-TileColor" content="{APP_THEME_COLOR}">
-            <link rel="icon" type="image/png" sizes="32x32" href="{_logo_data_uri}">
+            <link rel="apple-touch-icon" sizes="180x180" href="{logo_url}">
+            <link rel="icon" type="image/png" sizes="32x32" href="{logo_url}">
             """,
             unsafe_allow_html=True,
         )
@@ -204,6 +213,34 @@ MODULE_CONFIG = {
             "candidates": ["admin_docs_view"],
             "icon": "🗂️",
             "roles": ["Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare"],
+        },
+        {
+            "title": "Audit Center",
+            "path": SRC / "views" / "admin_docs.py",
+            "candidates": ["audit_center_view"],
+            "icon": "🧾",
+            "roles": ["Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare"],
+        },
+        {
+            "title": "Notifications",
+            "path": SRC / "views" / "admin_docs.py",
+            "candidates": ["notifications_center_view"],
+            "icon": "🔔",
+            "roles": ["Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare", "Member"],
+        },
+        {
+            "title": "Reminder Engine",
+            "path": SRC / "views" / "admin_docs.py",
+            "candidates": ["reminder_engine_view"],
+            "icon": "⏰",
+            "roles": ["Chairperson", "Secretary", "Treasurer", "Vice Chairperson", "Welfare"],
+        },
+        {
+            "title": "Welfare Support",
+            "path": SRC / "views" / "welfare_support_optimized.py",
+            "candidates": ["welfare_support_view"],
+            "icon": "🤝",
+            "roles": ["Member", "Welfare", "Chairperson", "Treasurer", "Secretary", "Vice Chairperson"],
         },
     ],
     "Account & Security": [
@@ -459,10 +496,10 @@ if __name__ == "__main__":
             <div style="max-width: 840px; margin: 28px auto; padding: 24px; border-radius: 22px; background: linear-gradient(135deg, #f8fafc 0%, #dbeafe 100%); border: 1px solid #bfdbfe; box-shadow: 0 18px 45px rgba(30, 64, 175, 0.08);">
                 <h2 style="margin: 0 0 12px; color: #1e3a8a; font-size: 1.55rem; font-weight: 700;">Database connection unavailable</h2>
                 <p style="margin: 0 0 14px; color: #475569; font-size: 1rem; line-height: 1.7;">
-                    The portal cannot reach the database right now. Please check your database host, credentials, and network connection.
+                The portal is temporarily unavailable, this may be due to a temporary network issue. Please wait a moment and try again. If the problem persists, contact your System administrator for assistance.
                 </p>
                 <p style="margin: 0; color: #0f172a; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.01em;">
-                    Refresh this page after the database is available.
+                    Refresh this page after the network is available.
                 </p>
             </div>
             """,

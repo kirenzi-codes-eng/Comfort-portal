@@ -1,18 +1,22 @@
 import time
 from calendar import monthrange
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from html import escape
 from typing import Any, Optional, Tuple
-
+ 
 import streamlit as st
 
 import pandas as pd
 
 from src.database.connection import execute_query
+from src.utils.audit import record_audit_event
 from src.utils.membership import normalize_membership_status
+from src.utils.notifications import create_notification
 from src.views.home import get_financial_metrics, calculate_member_status, format_currency, parse_db_datetime
 
 LEADERSHIP_ROLES = ("Treasurer", "Secretary", "Chairperson")
+FIRST_LOAN_DUE_DAYS = 30
+FIRST_LOAN_GRACE_DAYS = 10
 
 
 def months_between(start_date: datetime, end_date: datetime) -> float:
@@ -43,7 +47,7 @@ def should_apply_interest_for_loan(
     reference_date: Optional[datetime | date | str],
     last_interest_date: Optional[datetime | date | str],
     last_payment_date: Optional[datetime | date | str],
-    grace_period_days: int = 10,
+    grace_period_days: int = FIRST_LOAN_GRACE_DAYS,
 ) -> bool:
     start_day = _coerce_loan_date(start_date)
     if start_day is None or reference_date is None:
@@ -53,21 +57,19 @@ def should_apply_interest_for_loan(
     if reference_day is None:
         return False
 
-    if reference_day < start_day + timedelta(days=grace_period_days):
-        return False
-
-    if last_interest_date is None:
-        return True
-
     last_interest_day = _coerce_loan_date(last_interest_date)
-    if last_interest_day is None:
-        return True
-
     last_payment_day = _coerce_loan_date(last_payment_date)
-    if last_payment_day and last_payment_day >= last_interest_day:
+
+    if last_interest_day is None:
+        return reference_day >= start_day
+
+    current_due_date = last_interest_day + timedelta(days=FIRST_LOAN_DUE_DAYS)
+    current_grace_end = current_due_date + timedelta(days=grace_period_days)
+
+    if last_payment_day and last_payment_day > current_due_date and last_payment_day <= current_grace_end:
         return True
 
-    return reference_day >= last_interest_day + timedelta(days=30)
+    return reference_day >= current_grace_end
 
 
 def _coerce_loan_date(value: Any | None) -> Optional[date]:
@@ -89,16 +91,18 @@ def get_loan_interest_schedule(
     if start_day is None:
         return None, None
 
-    grace_end = start_day + timedelta(days=10)
-    if last_interest_date is None:
-        next_interest_due = grace_end
+    first_due_date = start_day + timedelta(days=FIRST_LOAN_DUE_DAYS)
+    first_grace_end = first_due_date + timedelta(days=FIRST_LOAN_GRACE_DAYS)
+    last_interest_day = _coerce_loan_date(last_interest_date)
+
+    if last_interest_day is None:
+        next_interest_due = start_day
+        grace_end = first_grace_end
     else:
-        last_interest_day = _coerce_loan_date(last_interest_date)
-        last_payment_day = _coerce_loan_date(last_payment_date)
-        anchor_day = last_interest_day or start_day
-        if last_payment_day and last_interest_day and last_payment_day >= last_interest_day:
-            anchor_day = last_payment_day
-        next_interest_due = anchor_day + timedelta(days=30)
+        current_due_date = last_interest_day + timedelta(days=FIRST_LOAN_DUE_DAYS)
+        current_grace_end = current_due_date + timedelta(days=FIRST_LOAN_GRACE_DAYS)
+        next_interest_due = current_grace_end
+        grace_end = current_grace_end
 
     return next_interest_due, grace_end
 
@@ -118,6 +122,40 @@ def ensure_loan_interest_tracking_columns() -> None:
         )
     except Exception as exc:
         st.warning(f"Unable to ensure loan interest tracking columns: {exc}")
+
+
+def approve_loan(loan_id: int, approver_role: str) -> bool:
+    """Approve a submitted loan and trigger its first interest charge immediately."""
+    try:
+        execute_query(
+            "UPDATE loans SET status = 'Approved', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
+            params=(approver_role, datetime.now(timezone.utc), loan_id),
+            fetch=False,
+        )
+        record_audit_event(
+            entity_type="loan",
+            entity_id=str(loan_id),
+            action="loan_approved",
+            actor_name=approver_role,
+            actor_role=approver_role,
+            details="Loan approved",
+        )
+        create_notification(
+            recipient_type="role",
+            recipient_id="Treasurer",
+            recipient_role="Treasurer",
+            title="Loan approved",
+            message=f"A loan request was approved by {approver_role}.",
+            category="Loans",
+            module_name="Loans",
+            related_record_id=str(loan_id),
+            priority="High",
+        )
+        update_interest_accumulation()
+        return True
+    except Exception as exc:
+        st.error(f"Failed to approve loan: {exc}")
+        return False
 
 
 def normalize_loan_status(status: Optional[str]) -> str:
@@ -726,9 +764,10 @@ def inject_loans_theme() -> None:
 
 
 def update_interest_accumulation(reference_date: Optional[datetime | date] = None) -> None:
-    """Apply grace-period interest to active/approved loans.
+    """Apply interest to active/approved loans.
 
-    Interest is applied once the loan is older than the 10-day grace period. If a repayment has
+    Interest is charged immediately when a loan is first issued. The first repayment due date is
+    30 days after issuance, and a 10-day grace period follows that first due date. If a repayment has
     occurred since the last interest charge, the current balance is charged immediately. Otherwise,
     the balance is charged again once a month while the loan remains unpaid.
     """
@@ -760,14 +799,13 @@ def update_interest_accumulation(reference_date: Optional[datetime | date] = Non
             if not should_apply_interest_for_loan(start_date, ref, last_interest_date, last_payment_date):
                 continue
 
-            principal = max(0.0, outstanding - interest_acc)
-            compounded = principal * 1.10
-            new_interest = compounded - principal
-            new_outstanding = compounded
+            principal = max(0.0, outstanding)
+            new_interest = principal * 0.10
+            new_outstanding = principal + new_interest
 
             execute_query(
                 "UPDATE loans SET interest_accumulated = %s, outstanding_balance = %s, last_interest_applied_at = %s WHERE loan_id = %s;",
-                params=(new_interest, new_outstanding, ref_date, loan_id),
+                params=(interest_acc + new_interest, new_outstanding, ref_date, loan_id),
                 fetch=False,
             )
         except Exception as e:
@@ -1247,22 +1285,34 @@ def render_executive_credit_control(user_role: str) -> None:
                     )
                     action_cols = st.columns([1, 1, 2], gap="small")
                     if action_cols[0].button("Approve", key=f"exec_approve_{loan['loan_id']}"):
-                        try:
-                            execute_query(
-                                "UPDATE loans SET status = 'Approved', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
-                                params=(user_role, datetime.utcnow(), loan["loan_id"]),
-                                fetch=False,
-                            )
+                        if approve_loan(loan["loan_id"], user_role):
                             st.success("Loan approved.")
                             st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to approve loan: {e}")
                     if action_cols[1].button("Reject", key=f"exec_reject_{loan['loan_id']}"):
                         try:
                             execute_query(
                                 "UPDATE loans SET status = 'Rejected', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
                                 params=(user_role, datetime.utcnow(), loan["loan_id"]),
                                 fetch=False,
+                            )
+                            record_audit_event(
+                                entity_type="loan",
+                                entity_id=str(loan["loan_id"]),
+                                action="loan_rejected",
+                                actor_name=user_role,
+                                actor_role=user_role,
+                                details="Loan rejected",
+                            )
+                            create_notification(
+                                recipient_type="member",
+                                recipient_id=str(loan.get("member_id") or loan["loan_id"]),
+                                recipient_role="Member",
+                                title="Loan rejected",
+                                message="Your loan request was rejected.",
+                                category="Loans",
+                                module_name="Loans",
+                                related_record_id=str(loan["loan_id"]),
+                                priority="High",
                             )
                             st.success("Loan rejected.")
                             st.rerun()

@@ -13,7 +13,13 @@ from typing import Optional
 from src.components.auth import get_avatar
 from src.database.connection import execute_query
 from src.utils.membership import get_membership_status_for_db, sanitize_member_status_records
-from src.utils.balances import get_effective_pool_balance
+from src.utils.balances import (
+    get_effective_member_balance,
+    get_effective_pool_balance,
+    get_effective_pool_welfare_balance,
+    get_member_balance_breakdown,
+    get_member_welfare_reserve_balance,
+)
 from src.utils.timezone import now_in_uganda
 
 logger = logging.getLogger(__name__)
@@ -134,27 +140,38 @@ def get_next_loan_due_date(user_id: Optional[str]) -> Optional[date]:
     if not user_id:
         return None
 
+    from src.views.loans import fetch_latest_member_loan, get_loan_interest_schedule
+
+    latest_loan = fetch_latest_member_loan(user_id)
+    if not latest_loan or latest_loan.get("status") not in ("Active", "Approved"):
+        return None
+
+    next_due, _ = get_loan_interest_schedule(
+        latest_loan.get("approved_date") or latest_loan.get("applied_date"),
+        latest_loan.get("last_interest_applied_at"),
+        latest_loan.get("last_payment_applied_at"),
+    )
+    return next_due
+
+
+def get_member_actual_loan_balance(user_id: Optional[str]) -> Optional[float]:
+    if not user_id:
+        return None
+
     rows = safe_execute_query(
-        "SELECT approved_date, applied_date FROM loans WHERE member_id = %s AND status IN ('Active','Approved');",
+        "SELECT outstanding_balance FROM loans WHERE member_id = %s AND status IN ('Active','Approved') ORDER BY COALESCE(approved_date, applied_date) DESC LIMIT 1;",
         params=(user_id,),
         fetch=True,
         fallback=[],
     ) or []
-    due_dates = []
-    for row in rows:
-        base_value = row.get("approved_date") or row.get("applied_date")
-        base_datetime = parse_db_datetime(base_value)
-        if base_datetime is not None:
-            due_dates.append(add_months(base_datetime, 1))
 
-    if due_dates:
-        return min(due_dates)
+    if not rows:
+        return None
 
-    if rows:
-        # There is an active or approved loan, but no valid date could be parsed.
-        return datetime.now().date()
-
-    return None
+    try:
+        return float(rows[0].get("outstanding_balance") or 0)
+    except (TypeError, ValueError):
+        return None
 
 
 def calculate_effective_loan_balance(rows: list[dict]) -> float:
@@ -248,6 +265,7 @@ def get_member_profile_details(user_id: Optional[str]) -> dict:
 
 def get_admin_dashboard_metrics() -> dict:
     pool_savings = get_effective_pool_balance()
+    total_welfare = get_effective_pool_welfare_balance()
 
     loan_rows = safe_execute_query(
         "SELECT amount_requested, outstanding_balance FROM loans WHERE status IN ('Active','Approved');",
@@ -299,6 +317,7 @@ def get_admin_dashboard_metrics() -> dict:
 
     return {
         "total_pool_savings": pool_savings,
+        "total_welfare": total_welfare,
         "total_cash_loaned": total_cash_loaned,
         "total_repaid": total_unrepaid,
         "total_arrears": total_arrears,
@@ -331,6 +350,8 @@ def get_financial_metrics_cached(user_id: str) -> dict:
             fallback=[{"outstanding_balance": MOCK_FINANCIAL_METRICS["loan_balance"], "interest_accumulated": 0.0, "amount_requested": MOCK_FINANCIAL_METRICS["loan_balance"]}],
         )
         loan_balance = calculate_effective_loan_balance(loan_rows or [])
+        if loan_balance == 0.0:
+            loan_balance = get_effective_member_balance(user_id)
 
         # Pending Subscription Arrears - compute year-to-date due amount
         today = today_in_uganda()
@@ -472,12 +493,23 @@ def get_featured_announcement(announcements):
 
 
 def render_announcements_carousel(announcements):
-    ann = get_featured_announcement(announcements)
+    """Render an auto-rotating carousel that slides every 4 seconds."""
+    if not announcements:
+        st.info("No announcements at this time.")
+        return
 
-    title_text = escape(str(ann.get("title") or "No announcements yet")) if ann else "No announcements yet"
-    content_text = escape(str(ann.get("content") or "New updates will appear here.")) if ann else "New updates will appear here."
-    author_text = escape(str(ann.get("posted_by") or "System")) if ann else "System"
-    meta_text = escape(str(ann.get("created_at") or "")) if ann else ""
+    # Initialize carousel state
+    if "carousel_index" not in st.session_state:
+        st.session_state.carousel_index = 0
+
+    total_announcements = len(announcements)
+    current_index = st.session_state.carousel_index % total_announcements
+    ann = announcements[current_index]
+
+    title_text = escape(str(ann.get("title") or "No announcements yet"))
+    content_text = escape(str(ann.get("content") or "New updates will appear here."))
+    author_text = escape(str(ann.get("posted_by") or "System"))
+    meta_text = escape(str(ann.get("created_at") or ""))
 
     # Prefer a static map image from the project's assets/ dir if available, otherwise fall back to the inline SVG
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -496,24 +528,42 @@ def render_announcements_carousel(announcements):
             "background-color: rgba(6,78,59,0.85); background-blend-mode: overlay;"
         )
 
-    st.markdown(
-        f"""
-        <div class="hero-shell" style="margin-top: 10px; {background_css}">
-          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;">
-            <div style="flex: 1 1 320px;">
-              <div style="font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.2em; opacity: 0.8;">System Updates & Announcements</div>
-              <div style="font-size: 1.14rem; font-weight: 700; color: #ffffff; margin: 8px 0 8px;">{title_text}</div>
-              <div style="color: rgba(255,255,255,0.92); font-size: 0.96rem; line-height: 1.6; margin-bottom: 8px;">{content_text}</div>
-              <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px;">
-                <div style="font-size: 0.82rem; color: rgba(255,255,255,0.82);">Posted by {author_text}{f' • {meta_text}' if meta_text else ''}</div>
-                <div style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.22); padding: 7px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 700; color: #ffffff;">Latest Update • {now_in_uganda().strftime('%d %b %Y')}</div>
-              </div>
+    # Carousel container - clean HTML with slide animation
+    announcement_html = f"""
+    <div style="margin-top: 10px; animation: slideIn 0.4s ease-out;">
+        <div class="hero-shell" style="{background_css}">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;">
+                <div style="flex: 1 1 320px;">
+                    <div style="font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.2em; opacity: 0.8;">System Updates & Announcements</div>
+                    <div style="font-size: 1.14rem; font-weight: 700; color: #ffffff; margin: 8px 0 8px;">{title_text}</div>
+                    <div style="color: rgba(255,255,255,0.92); font-size: 0.96rem; line-height: 1.6; margin-bottom: 8px;">{content_text}</div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px;">
+                        <div style="font-size: 0.82rem; color: rgba(255,255,255,0.82);">Posted by {author_text}{f' • {meta_text}' if meta_text else ''}</div>
+                        <div style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.22); padding: 7px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 700; color: #ffffff;">Latest Update • {now_in_uganda().strftime('%d %b %Y')}</div>
+                    </div>
+                </div>
             </div>
-          </div>
         </div>
+    </div>
+    """
+    
+    st.markdown(announcement_html, unsafe_allow_html=True)
+
+    # Auto-rotate every 4 seconds by refreshing the page in the background.
+    import streamlit.components.v1 as components
+    components.html(
+        """
+        <script>
+        setTimeout(() => {
+            window.location.reload();
+        }, 4000);
+        </script>
         """,
-        unsafe_allow_html=True,
+        height=0,
     )
+
+    # Prepare the next slide index for the next page refresh.
+    st.session_state.carousel_index = (current_index + 1) % total_announcements
 
 
 def render_member_activity_timeline(events: list[dict]) -> None:
@@ -939,8 +989,11 @@ def home_view():
 
         subscriptions_contributed = float(metrics.get("total_paid", 0) or 0)
         arrears_balance = float(metrics.get("arrears", 0) or 0)
-        loan_balance = float(metrics.get("loan_balance", 0) or 0)
-        next_due_date = get_next_loan_due_date(user_id) if user_id else None
+        balance_breakdown = get_member_balance_breakdown(user_id) if user_id else {"welfare_balance": 0.0, "savings_balance": 0.0}
+        actual_loan_balance = get_member_actual_loan_balance(user_id) if user_id else None
+        loan_balance = float(actual_loan_balance if actual_loan_balance is not None else 0)
+
+        next_due_date = get_next_loan_due_date(user_id) if actual_loan_balance is not None else None
         member_activity_timeline = get_member_activity_timeline(user_id, limit=6) if user_id else []
         if next_due_date:
             next_due_display = next_due_date.strftime("%d %b %Y")
@@ -1124,6 +1177,8 @@ def home_view():
                 <div class="action-title">Subscriptions</div>
                 <div class="action-stats">
                   <div class="action-stat"><span class="action-stat-label">Total Contributed</span><span class="action-stat-value">{format_currency(subscriptions_contributed)}</span></div>
+                  <div class="action-stat"><span class="action-stat-label">Welfare Reserve</span><span class="action-stat-value">{format_currency(balance_breakdown.get('welfare_balance', 0.0))}</span></div>
+                  <div class="action-stat"><span class="action-stat-label">Savings Balance</span><span class="action-stat-value">{format_currency(balance_breakdown.get('savings_balance', 0.0))}</span></div>
                   <div class="action-stat"><span class="action-stat-label">Pending Arrears</span><span class="action-stat-value">{format_currency(arrears_balance)}</span></div>
                 </div>
               </div>
@@ -1169,6 +1224,7 @@ def home_view():
 
             admin_metrics = get_admin_dashboard_metrics()
             total_pool_savings = float(admin_metrics.get("total_pool_savings") or 0)
+            total_welfare = float(admin_metrics.get("total_welfare") or 0)
             total_cash_loaned = float(admin_metrics.get("total_cash_loaned") or 0)
             total_repaid = float(admin_metrics.get("total_repaid") or 0)
             total_arrears = float(admin_metrics.get("total_arrears") or 0)
@@ -1178,6 +1234,7 @@ def home_view():
                 f"""
                 <div style="display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;">
                   <div class="kpi-card"><div class="kpi-label">Total Savings Pool</div><div class="kpi-value">{format_currency(total_pool_savings)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Welfare</div><div class="kpi-value">{format_currency(total_welfare)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Cash Loaned</div><div class="kpi-value">{format_currency(total_cash_loaned)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Unrepaid Loan Amount</div><div class="kpi-value">{format_currency(total_repaid)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Outstanding Arrears</div><div class="kpi-value">{format_currency(total_arrears)}</div></div>
