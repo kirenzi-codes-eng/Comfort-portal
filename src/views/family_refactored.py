@@ -378,14 +378,54 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
                 )
                 update_rows.append(((full_name or "").strip(), (contact or "").strip() or "N/A", vital_status, record["id"]))
 
+            new_entries: list[tuple[str, str, str, str]] = []
+            if user_role == "Chairperson":
+                st.markdown(
+                    """
+                    <div class="form-card">
+                        <div class="form-card-title">➕ Add missing family entries</div>
+                        <p style="margin: 0 0 0.6rem; color: #475569;">The Chairperson can add relationships that were left out of the original submission, including 1 to 8 children.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                new_relationship = st.selectbox(
+                    "New relationship",
+                    ["None", "Spouse", "Father", "Mother", "Father-in-law", "Mother-in-law", "Next of Kin"],
+                    key="family_new_relationship",
+                )
+                if new_relationship != "None":
+                    new_name = st.text_input("New relationship full name", key="family_new_name")
+                    new_contact = st.text_input("New relationship contact", key="family_new_contact")
+                    if new_name and new_name.strip():
+                        new_entries.append((new_relationship, new_name.strip(), (new_contact or "").strip() or "N/A", "Alive"))
+
+                new_children_count = st.number_input(
+                    "Additional children to add (1 to 8)",
+                    min_value=0,
+                    max_value=8,
+                    value=0,
+                    step=1,
+                    key="family_new_children_count",
+                )
+                for index in range(int(new_children_count)):
+                    child_name = st.text_input(f"Additional child {index + 1} full name", key=f"family_new_child_name_{index}")
+                    child_contact = st.text_input(f"Additional child {index + 1} contact", key=f"family_new_child_contact_{index}")
+                    if child_name and child_name.strip():
+                        new_entries.append(("Child", child_name.strip(), (child_contact or "").strip() or "N/A", "Alive"))
+
             st.markdown('<div class="accent-btn">', unsafe_allow_html=True)
             submitted = st.form_submit_button("Save registry updates")
             st.markdown('</div>', unsafe_allow_html=True)
             if submitted:
-                _update_family_records(update_rows)
-                st.session_state["family_registry_edit_mode"] = False
-                st.success("Registry updated and locked again.")
-                st.rerun()
+                if not update_rows and not new_entries:
+                    st.warning("Add or update at least one family entry before saving.")
+                else:
+                    _update_family_records(update_rows)
+                    _insert_family_records(member_identifier, new_entries)
+                    st.session_state["family_registry_edit_mode"] = False
+                    st.success("Registry updated and locked again.")
+                    st.rerun()
         return
 
     with st.form("family_create_form"):
@@ -426,12 +466,12 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
             unsafe_allow_html=True,
         )
         children_count = st.number_input(
-            "How many children would you like to add? (max 8)",
+            "How many children would you like to add? (1 to 8)",
             min_value=0,
             max_value=8,
             value=0,
             step=1,
-            help="Optional — add up to 8 children.",
+            help="Optional — if adding children, choose between 1 and 8.",
         )
         if children_count > 0:
             st.caption(f"Child entry fields ready: {int(children_count)}")

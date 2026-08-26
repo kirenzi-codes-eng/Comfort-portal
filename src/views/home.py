@@ -195,14 +195,18 @@ def get_member_activity_timeline(user_id: Optional[str], limit: int = 6) -> list
         return []
 
     subscription_rows = safe_execute_query(
-        "SELECT billing_month, amount_paid, status FROM subscriptions WHERE member_id = %s ORDER BY billing_month DESC LIMIT 12;",
+        "SELECT s.id, s.billing_month, s.amount_paid, s.status, m.full_name AS payer_name "
+        "FROM subscriptions s LEFT JOIN members m ON m.member_id = s.member_id "
+        "WHERE s.member_id = %s ORDER BY s.billing_month DESC LIMIT 12;",
         params=(user_id,),
         fetch=True,
         fallback=[],
     ) or []
 
     loan_rows = safe_execute_query(
-        "SELECT applied_date, approved_date, amount_requested, status FROM loans WHERE member_id = %s ORDER BY COALESCE(approved_date, applied_date) DESC LIMIT 12;",
+        "SELECT l.id, l.loan_id, l.applied_date, l.approved_date, l.amount_requested, l.outstanding_balance, l.status, l.approved_by, "
+        "m.full_name AS applicant_name FROM loans l LEFT JOIN members m ON m.member_id = l.member_id "
+        "WHERE l.member_id = %s ORDER BY COALESCE(l.approved_date, l.applied_date) DESC LIMIT 12;",
         params=(user_id,),
         fetch=True,
         fallback=[],
@@ -214,12 +218,15 @@ def get_member_activity_timeline(user_id: Optional[str], limit: int = 6) -> list
         if timestamp is None:
             continue
         amount = float(row.get("amount_paid") or 0.0)
-        status = str(row.get("status") or "Pending")
+        status = str(row.get("status") or "Pending").strip().title()
+        payer_name = str(row.get("payer_name") or "Member account")
+        follow_up = "Confirm payment was received." if status.lower() in {"pending", "submitted"} else "No action required."
         events.append(
             {
                 "kind": "subscription",
-                "title": "Subscription payment recorded",
-                "description": f"{format_currency(amount)} contributed for {timestamp.strftime('%b %Y')} • {status}",
+                "title": f"Subscription payment • {status}",
+                "description": f"Paid by: {payer_name} | Amount: {format_currency(amount)} | Billing month: {timestamp.strftime('%B %Y')} | Reference: {row.get('id') or 'Not available'}",
+                "follow_up": follow_up,
                 "timestamp": timestamp,
             }
         )
@@ -229,12 +236,23 @@ def get_member_activity_timeline(user_id: Optional[str], limit: int = 6) -> list
         if timestamp is None:
             continue
         amount = float(row.get("amount_requested") or 0.0)
-        status = str(row.get("status") or "Submitted")
+        outstanding_balance = float(row.get("outstanding_balance") or 0.0)
+        status = str(row.get("status") or "Submitted").strip().title()
+        reference = row.get("loan_id") or row.get("id") or "Not available"
+        applicant_name = str(row.get("applicant_name") or "Member account")
+        approver_name = str(row.get("approved_by") or "Awaiting approval")
+        if status.lower() in {"submitted", "pending", "applied"}:
+            follow_up = "Review application and confirm approval status."
+        elif outstanding_balance > 0:
+            follow_up = f"Follow up on repayment balance: {format_currency(outstanding_balance)} outstanding."
+        else:
+            follow_up = "Loan appears settled; confirm closure records."
         events.append(
             {
                 "kind": "loan",
-                "title": f"Loan {status.lower()}",
-                "description": f"{format_currency(amount)} requested • {status}",
+                "title": f"Loan application • {status}",
+                "description": f"Applied by: {applicant_name} | Requested: {format_currency(amount)} | Outstanding: {format_currency(outstanding_balance)} | Approved by: {approver_name} | Reference: {reference}",
+                "follow_up": follow_up,
                 "timestamp": timestamp,
             }
         )
@@ -407,13 +425,40 @@ def format_currency(value) -> str:
 
 
 def get_member_summary_stats() -> dict:
+    today = today_in_uganda()
+    current_year = today.year
+    current_month = today.month
     rows = safe_execute_query(
-        "SELECT COUNT(*) AS total_members, "
-        "SUM(CASE WHEN status IN ('Active','Probationary','Partial Member','Full Member') THEN 1 ELSE 0 END) AS active_members, "
-        "SUM(CASE WHEN status = 'Inactive' THEN 1 ELSE 0 END) AS inactive_members, "
-        "SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending_members "
-        "FROM members;",
-        params=None,
+        """
+        SELECT COUNT(*) AS total_members,
+               SUM(CASE
+                     WHEN lower(trim(coalesce(m.status, 'pending'))) IN
+                          ('active', 'probationary', 'probational', 'partial', 'partial member', 'full', 'full member')
+                       AND greatest(0, (%s - coalesce(paid.total_paid_year, 0))) < 40000
+                     THEN 1 ELSE 0
+                   END) AS active_members,
+               SUM(CASE
+                     WHEN lower(trim(coalesce(m.status, 'pending'))) IN
+                          ('inactive', 'suspended', 'terminated')
+                       OR (lower(trim(coalesce(m.status, 'pending'))) IN
+                          ('active', 'probationary', 'probational', 'partial', 'partial member', 'full', 'full member')
+                           AND greatest(0, (%s - coalesce(paid.total_paid_year, 0))) >= 40000)
+                     THEN 1 ELSE 0
+                   END) AS inactive_members,
+               SUM(CASE
+                     WHEN lower(trim(coalesce(m.status, 'pending'))) IN
+                          ('pending', 'due', 'open', 'incomplete', 'rejected')
+                     THEN 1 ELSE 0
+                   END) AS pending_members
+        FROM members m
+        LEFT JOIN (
+            SELECT member_id, SUM(coalesce(amount_paid, 0)) AS total_paid_year
+            FROM subscriptions
+            WHERE extract(year FROM billing_month) = %s
+            GROUP BY member_id
+        ) paid ON paid.member_id = m.member_id;
+        """,
+        params=(current_month * 20000, current_month * 20000, current_year),
         fetch=True,
         fallback=[
             {
@@ -583,6 +628,7 @@ def render_member_activity_timeline(events: list[dict]) -> None:
               <span class="timeline-time">{escape(timestamp_text)}</span>
               <div class="timeline-title">{escape(str(event.get('title') or 'Activity'))}</div>
               <div class="timeline-desc">{escape(str(event.get('description') or ''))}</div>
+                            <div class="timeline-follow-up"><strong>Follow-up:</strong> {escape(str(event.get('follow_up') or 'No follow-up recorded.'))}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -872,6 +918,13 @@ def home_view():
             font-size: 0.87rem;
             color: #475569;
         }
+        .timeline-follow-up {
+            margin-top: 8px;
+            padding-top: 7px;
+            border-top: 1px solid #E2E8F0;
+            font-size: 0.82rem;
+            color: #92400E;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -993,8 +1046,11 @@ def home_view():
         actual_loan_balance = get_member_actual_loan_balance(user_id) if user_id else None
         loan_balance = float(actual_loan_balance if actual_loan_balance is not None else 0)
 
-        next_due_date = get_next_loan_due_date(user_id) if actual_loan_balance is not None else None
-        member_activity_timeline = get_member_activity_timeline(user_id, limit=6) if user_id else []
+        try:
+            next_due_date = get_next_loan_due_date(user_id) if actual_loan_balance is not None else None
+        except Exception:
+            logger.exception("Unable to load next loan due date")
+            next_due_date = None
         if next_due_date:
             next_due_display = next_due_date.strftime("%d %b %Y")
         elif loan_balance > 0:
@@ -1204,6 +1260,12 @@ def home_view():
             """,
             unsafe_allow_html=True,
         )
+
+        try:
+            member_activity_timeline = get_member_activity_timeline(user_id, limit=6) if user_id else []
+        except Exception:
+            logger.exception("Unable to load member activity timeline")
+            member_activity_timeline = []
 
         if user_role in allowed_roles:
             render_member_activity_timeline(member_activity_timeline)

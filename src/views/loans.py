@@ -124,19 +124,19 @@ def ensure_loan_interest_tracking_columns() -> None:
         st.warning(f"Unable to ensure loan interest tracking columns: {exc}")
 
 
-def approve_loan(loan_id: int, approver_role: str) -> bool:
+def approve_loan(loan_id: int, approver_role: str, approver_name: Optional[str] = None) -> bool:
     """Approve a submitted loan and trigger its first interest charge immediately."""
     try:
         execute_query(
             "UPDATE loans SET status = 'Approved', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
-            params=(approver_role, datetime.now(timezone.utc), loan_id),
+            params=(f"{approver_name.strip()} ({approver_role})" if approver_name and approver_name.strip() else approver_role, datetime.now(timezone.utc), loan_id),
             fetch=False,
         )
         record_audit_event(
             entity_type="loan",
             entity_id=str(loan_id),
             action="loan_approved",
-            actor_name=approver_role,
+            actor_name=approver_name or approver_role,
             actor_role=approver_role,
             details="Loan approved",
         )
@@ -145,7 +145,7 @@ def approve_loan(loan_id: int, approver_role: str) -> bool:
             recipient_id="Treasurer",
             recipient_role="Treasurer",
             title="Loan approved",
-            message=f"A loan request was approved by {approver_role}.",
+            message=f"A loan request was approved by {approver_name or approver_role}.",
             category="Loans",
             module_name="Loans",
             related_record_id=str(loan_id),
@@ -1285,7 +1285,7 @@ def render_executive_credit_control(user_role: str) -> None:
                     )
                     action_cols = st.columns([1, 1, 2], gap="small")
                     if action_cols[0].button("Approve", key=f"exec_approve_{loan['loan_id']}"):
-                        if approve_loan(loan["loan_id"], user_role):
+                        if approve_loan(loan["loan_id"], user_role, st.session_state.get("user_name")):
                             st.success("Loan approved.")
                             st.rerun()
                     if action_cols[1].button("Reject", key=f"exec_reject_{loan['loan_id']}"):

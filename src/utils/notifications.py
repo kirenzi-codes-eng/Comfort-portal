@@ -41,6 +41,33 @@ def ensure_notification_table() -> None:
     except Exception:
         pass
 
+    try:
+        execute_query(
+            """
+            ALTER TABLE notifications
+                ADD COLUMN IF NOT EXISTS recipient_type TEXT,
+                ADD COLUMN IF NOT EXISTS recipient_id TEXT,
+                ADD COLUMN IF NOT EXISTS recipient_role TEXT,
+                ADD COLUMN IF NOT EXISTS title TEXT,
+                ADD COLUMN IF NOT EXISTS message TEXT,
+                ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'System',
+                ADD COLUMN IF NOT EXISTS module_name TEXT,
+                ADD COLUMN IF NOT EXISTS related_record_id TEXT,
+                ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Normal',
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS read_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS delivery_status TEXT DEFAULT 'Pending',
+                ADD COLUMN IF NOT EXISTS action_link TEXT,
+                ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
+            """,
+            params=None,
+            fetch=False,
+        )
+    except Exception:
+        pass
+
 
 def ensure_notification_preferences_table() -> None:
     """Ensure notification preference storage exists."""
@@ -300,11 +327,11 @@ def get_unread_notification_count(recipient_type: str, recipient_id: Optional[st
             WHERE is_read = FALSE
               AND (
                 (recipient_type = 'all_members')
-                OR (recipient_type = 'role' AND recipient_role = %s)
+                                OR (recipient_type = 'role' AND (recipient_role = %s OR recipient_id = %s))
                 OR (recipient_type = 'member' AND recipient_id = %s)
               );
             """,
-            params=(recipient_role, recipient_id),
+                        params=(recipient_role, recipient_id, recipient_id),
             fetch=True,
         )
         first_row = rows[0] if rows else None
@@ -325,13 +352,13 @@ def get_notifications_for_user(recipient_type: str, recipient_id: Optional[str],
             WHERE is_read = FALSE
               AND (
                 (recipient_type = 'all_members')
-                OR (recipient_type = 'role' AND recipient_role = %s)
+                                OR (recipient_type = 'role' AND (recipient_role = %s OR recipient_id = %s))
                 OR (recipient_type = 'member' AND recipient_id = %s)
               )
             ORDER BY created_at DESC, id DESC
             LIMIT %s;
             """,
-            params=(recipient_role, recipient_id, limit),
+            params=(recipient_role, recipient_id, recipient_id, limit),
             fetch=True,
         )
         return rows or []
@@ -361,11 +388,11 @@ def mark_all_notifications_read(recipient_type: str, recipient_id: Optional[str]
             SET is_read = TRUE, read_at = %s
             WHERE (
                 (recipient_type = 'all_members')
-                OR (recipient_type = 'role' AND recipient_role = %s)
+                OR (recipient_type = 'role' AND (recipient_role = %s OR recipient_id = %s))
                 OR (recipient_type = 'member' AND recipient_id = %s)
             );
             """,
-            params=(datetime.now(timezone.utc), recipient_role, recipient_id),
+            params=(datetime.now(timezone.utc), recipient_role, recipient_id, recipient_id),
             fetch=False,
         )
         return True
