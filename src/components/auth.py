@@ -396,6 +396,41 @@ def find_member_by_identifier(identifier: str):
         return None
 
 
+def request_password_reset(identifier: str) -> bool:
+    """Notify the Secretary that a member needs help recovering access."""
+    normalized_identifier = (identifier or "").strip()
+    if not normalized_identifier:
+        return False
+
+    member = find_member_by_identifier(normalized_identifier)
+    if member is None:
+        return False
+
+    member_id = member.get("member_id")
+    if not member_id:
+        return False
+
+    notification_ids = []
+    for recipient_role in ("Secretary", "Chairperson"):
+        notification_ids.append(
+            create_notification(
+                recipient_type="role",
+                recipient_id=recipient_role,
+                recipient_role=recipient_role,
+                title="Password recovery requested",
+                message=(
+                    f"Member {member_id} ({member.get('full_name') or 'Unknown member'}) "
+                    "requested help recovering their account password."
+                ),
+                category="Membership",
+                module_name="Auth",
+                related_record_id=member_id,
+                priority="High",
+            )
+        )
+    return any(notification_id is not None for notification_id in notification_ids)
+
+
 @lru_cache(maxsize=1)
 def _load_cloudinary_config() -> bool:
     try:
@@ -648,6 +683,50 @@ def update_member_password(member_id: str, current_password: str, new_password: 
         return False, f"Failed to update password: {exc}"
 
 
+def reset_member_password_by_admin(
+    member_id: str,
+    new_password: str,
+    actor_id: str,
+    actor_role: str,
+) -> tuple[bool, str]:
+    if actor_role not in {"Secretary", "Chairperson"}:
+        return False, "Only the Secretary or Chairperson can reset a member password."
+    if not member_id or len(new_password or "") < 8:
+        return False, "The temporary password must contain at least 8 characters."
+
+    member = find_member_by_identifier(member_id)
+    if member is None:
+        return False, "Unable to locate the member account."
+
+    try:
+        execute_query(
+            "UPDATE members SET password_hash = %s WHERE member_id = %s;",
+            params=(hash_password(new_password), member_id),
+            fetch=False,
+        )
+        record_audit_event(
+            entity_type="member",
+            entity_id=member_id,
+            action="password_reset_by_admin",
+            actor_name=actor_id or actor_role,
+            actor_role=actor_role,
+            details="Member password reset after recovery request",
+        )
+        create_notification(
+            recipient_type="member",
+            recipient_id=member_id,
+            title="Password reset completed",
+            message="Your password was reset by the SACCO office. Sign in with the temporary password and change it from your profile.",
+            category="System",
+            module_name="Auth",
+            related_record_id=member_id,
+            priority="High",
+        )
+        return True, "Password reset successfully. Share the temporary password with the member securely."
+    except Exception as exc:
+        return False, f"Failed to reset the password: {exc}"
+
+
 def auth_ui():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
@@ -714,6 +793,21 @@ def auth_ui():
                     help="This saves your Member ID/email so it is ready next time.",
                 )
                 submitted = st.form_submit_button("Log in", disabled=st.session_state._login_in_progress)
+
+            with st.expander("Forgot password?"):
+                st.caption("Submit your Member ID or email and the SACCO office will help you recover access.")
+                with st.form("forgot_password_form"):
+                    recovery_identifier = st.text_input(
+                        "Member ID or Email",
+                        placeholder="CBO-001 or name@example.com",
+                    )
+                    recovery_submitted = st.form_submit_button("Request password help")
+
+                if recovery_submitted:
+                    if request_password_reset(recovery_identifier):
+                        st.success("Your request has been sent to the SACCO office. Please watch for further instructions.")
+                    else:
+                        st.error("We could not submit your request right now. Please check your Member ID or email and try again.")
 
             if submitted and not st.session_state._login_in_progress:
                 st.session_state._login_in_progress = True

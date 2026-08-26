@@ -15,6 +15,7 @@ from reportlab.pdfgen import canvas
 
 from app import coerce_date_input_value
 from src.database.connection import execute_query
+from src.components.auth import reset_member_password_by_admin
 from src.utils.audit import (
     build_audit_dashboard_summary,
     fetch_enriched_audit_events,
@@ -785,14 +786,21 @@ def notifications_center_view() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    unread_count = get_unread_notification_count("member", user_id, recipient_role=user_role)
+    notification_recipient_type = "role" if user_role in {"Secretary", "Chairperson"} else "member"
+    notification_recipient_id = user_role if notification_recipient_type == "role" else user_id
+    unread_count = get_unread_notification_count(notification_recipient_type, notification_recipient_id, recipient_role=user_role)
     st.metric("Unread", unread_count)
     if st.button("Mark all as read", width="content"):
-        mark_all_notifications_read("member", user_id, recipient_role=user_role)
+        mark_all_notifications_read(notification_recipient_type, notification_recipient_id, recipient_role=user_role)
         st.success("All notifications marked as read.")
         st.rerun()
 
-    notifications = get_notifications_for_user("member", user_id, recipient_role=user_role, limit=100)
+    notifications = get_notifications_for_user(
+        notification_recipient_type,
+        notification_recipient_id,
+        recipient_role=user_role,
+        limit=100,
+    )
     if not notifications:
         st.info("No notifications yet.")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -814,6 +822,27 @@ def notifications_center_view() -> None:
                 if not is_read and st.button("Mark read", key=f"mark_read_{notification.get('id')}", width="stretch"):
                     mark_notification_read(int(notification.get("id")))
                     st.rerun()
+            if notification.get("title") == "Password recovery requested" and user_role in {"Secretary", "Chairperson"}:
+                with st.expander("Reset this member password"):
+                    temporary_password = st.text_input(
+                        "Temporary password",
+                        type="password",
+                        key=f"temporary_password_{notification.get('id')}",
+                    )
+                    if st.button("Approve reset", key=f"approve_reset_{notification.get('id')}", width="stretch"):
+                        member_id = str(notification.get("related_record_id") or "").strip()
+                        reset_ok, reset_message = reset_member_password_by_admin(
+                            member_id,
+                            temporary_password,
+                            str(user_id),
+                            user_role,
+                        )
+                        if reset_ok:
+                            mark_notification_read(int(notification.get("id")))
+                            st.success(reset_message)
+                            st.rerun()
+                        else:
+                            st.error(reset_message)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
