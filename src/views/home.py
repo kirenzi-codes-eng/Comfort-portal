@@ -33,6 +33,7 @@ MOCK_FINANCIAL_METRICS = {
 MOCK_ADMIN_METRICS = {
     "total_pool_savings": 7420000.0,
     "total_cash_loaned": 1840000.0,
+    "total_unpaid_interest": 0.0,
     "total_repaid": 1320000.0,
     "total_arrears": 203000.0,
 }
@@ -286,13 +287,26 @@ def get_admin_dashboard_metrics() -> dict:
     total_welfare = get_effective_pool_welfare_balance()
 
     loan_rows = safe_execute_query(
-        "SELECT amount_requested, outstanding_balance FROM loans WHERE status IN ('Active','Approved');",
+        "SELECT amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated "
+        "FROM loans WHERE status IN ('Active','Approved');",
         params=None,
         fetch=True,
         fallback=[],
     ) or []
     total_cash_loaned = sum(
         float(row.get("amount_requested") or row.get("outstanding_balance") or 0.0)
+        for row in loan_rows
+    )
+    total_unpaid_interest = sum(
+        float(row.get("interest_accumulated") or 0.0)
+        for row in loan_rows
+    )
+    total_unrepaid_principal = sum(
+        max(
+            0.0,
+            float(row.get("outstanding_balance") or 0.0)
+            - float(row.get("interest_accumulated") or 0.0),
+        )
         for row in loan_rows
     )
     total_unrepaid = sum(
@@ -337,6 +351,9 @@ def get_admin_dashboard_metrics() -> dict:
         "total_pool_savings": pool_savings,
         "total_welfare": total_welfare,
         "total_cash_loaned": total_cash_loaned,
+        "total_unpaid_interest": total_unpaid_interest,
+        "total_unrepaid_interest": total_unpaid_interest,
+        "total_unrepaid_principal": total_unrepaid_principal,
         "total_repaid": total_unrepaid,
         "total_arrears": total_arrears,
         "borrowers": borrower_rows,
@@ -1288,6 +1305,12 @@ def home_view():
             total_pool_savings = float(admin_metrics.get("total_pool_savings") or 0)
             total_welfare = float(admin_metrics.get("total_welfare") or 0)
             total_cash_loaned = float(admin_metrics.get("total_cash_loaned") or 0)
+            total_unrepaid_principal = float(admin_metrics.get("total_unrepaid_principal") or 0)
+            total_unrepaid_interest = float(
+                admin_metrics.get("total_unrepaid_interest")
+                or admin_metrics.get("total_unpaid_interest")
+                or 0
+            )
             total_repaid = float(admin_metrics.get("total_repaid") or 0)
             total_arrears = float(admin_metrics.get("total_arrears") or 0)
             admin_borrowers_rows = admin_metrics.get("borrowers") or []
@@ -1297,7 +1320,9 @@ def home_view():
                 <div style="display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;">
                   <div class="kpi-card"><div class="kpi-label">Total Savings Pool</div><div class="kpi-value">{format_currency(total_pool_savings)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Welfare</div><div class="kpi-value">{format_currency(total_welfare)}</div></div>
-                  <div class="kpi-card"><div class="kpi-label">Total Cash Loaned</div><div class="kpi-value">{format_currency(total_cash_loaned)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Cash Loaned (Principal)</div><div class="kpi-value">{format_currency(total_cash_loaned)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Unrepaid Principal</div><div class="kpi-value">{format_currency(total_unrepaid_principal)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Unrepaid Interest</div><div class="kpi-value">{format_currency(total_unrepaid_interest)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Unrepaid Loan Amount</div><div class="kpi-value">{format_currency(total_repaid)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Outstanding Arrears</div><div class="kpi-value">{format_currency(total_arrears)}</div></div>
                 </div>

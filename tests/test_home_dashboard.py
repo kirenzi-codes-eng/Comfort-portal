@@ -62,6 +62,34 @@ class HomeDashboardTests(unittest.TestCase):
 
         self.assertEqual(metrics["total_paid"], 250000.0)
 
+    def test_get_admin_dashboard_metrics_separates_principal_and_unpaid_interest(self):
+        def fake_execute(query, params=None, fetch=False, fallback=None):
+            if "FROM loans" in query and "interest_accumulated" in query:
+                return [
+                    {
+                        "amount_requested": 100000.0,
+                        "outstanding_balance": 110000.0,
+                        "interest_accumulated": 10000.0,
+                    }
+                ]
+            if "FROM loans" in query:
+                return []
+            if "FROM members" in query:
+                return [{"total_arrears": 0.0}]
+            return []
+
+        with patch("src.views.home.safe_execute_query", side_effect=fake_execute), patch(
+            "src.views.home.get_effective_pool_balance", return_value=0.0
+        ), patch("src.views.home.get_effective_pool_welfare_balance", return_value=0.0):
+            from src.views.home import get_admin_dashboard_metrics
+
+            metrics = get_admin_dashboard_metrics()
+
+        self.assertEqual(metrics["total_cash_loaned"], 100000.0)
+        self.assertEqual(metrics["total_unrepaid_principal"], 100000.0)
+        self.assertEqual(metrics["total_unpaid_interest"], 10000.0)
+        self.assertEqual(metrics["total_unrepaid_interest"], 10000.0)
+
     def test_member_summary_counts_activity_arrears_and_status_variants(self):
         captured = {}
 
