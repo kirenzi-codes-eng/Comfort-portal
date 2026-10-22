@@ -13,7 +13,16 @@ import streamlit as st
 from src.database.connection import execute_query, get_conn_from_pool
 from src.utils.audit import record_audit_event
 from src.utils.notifications import create_notification
-from src.utils.balances import ensure_member_balance_adjustments_table, get_member_welfare_reserve_balance
+from src.utils.balances import (
+    InsufficientFundsError,
+    ensure_member_balance_adjustments_table,
+    get_member_welfare_ledger_totals,
+    get_welfare_fund_totals,
+    get_welfare_payment_amount,
+    post_welfare_contribution,
+    post_welfare_payment,
+    get_welfare_contribution_breakdown,
+)
 from src.views.subscriptions import upload_subscription_proof_to_cloudinary
 from src.utils.timezone import today_in_uganda
 from src.utils.membership import normalize_membership_status
@@ -198,10 +207,6 @@ def set_member_welfare_account_status(member_id: Optional[str], new_status: Opti
     )
     st.cache_data.clear()
     return True
-
-
-def _should_suspend_for_zero_balance(current_balance: float, deduction_amount: float) -> bool:
-    return float(current_balance or 0.0) < float(deduction_amount or 0.0) and float(deduction_amount or 0.0) > 0.0
 
 
 def _ensure_member_welfare_account(member_id: Optional[str], member_name: Optional[str] = None) -> None:
@@ -736,19 +741,10 @@ def get_member_paid_welfare_details(member_id: Optional[str]) -> dict:
     ) or []
 
     request_row = request_rows[0] if request_rows else {}
-    contribution_rows = execute_query(
-        """
-        SELECT member_id, member_name, amount AS contribution_amount
-        FROM ledger_transactions
-        WHERE related_request_id = %s AND transaction_type = 'Welfare Contribution'
-        ORDER BY member_name;
-        """,
-        params=(request_row.get("id"),),
-        fetch=True,
-    ) or []
+    contribution_rows = get_welfare_contribution_breakdown(int(request_row["id"])) if request_row.get("id") else []
 
     return {
-        "amount_paid": float(request_row.get("payment_amount") or 0.0),
+        "amount_paid": get_welfare_payment_amount(int(request_row["id"])) if request_row.get("id") else 0.0,
         "payment_reference": request_row.get("payment_reference"),
         "payment_date": request_row.get("payment_date"),
         "contributions": [
@@ -779,32 +775,27 @@ def get_member_welfare_summary(member_id: Optional[str]) -> dict:
     rows = execute_query(
         """
         SELECT
-            COALESCE(SUM(CASE WHEN lt.transaction_type = 'Welfare Support Credit' THEN lt.amount ELSE 0 END), 0) AS credits,
-            COALESCE(SUM(CASE WHEN lt.transaction_type = 'Welfare Contribution' THEN ABS(lt.amount) ELSE 0 END), 0) AS contributions,
-            MAX(CASE WHEN lt.transaction_type = 'Welfare Contribution' THEN lt.created_at ELSE NULL END) AS last_contribution_date,
             COUNT(DISTINCT wr1.id) AS cases_requested,
             COUNT(DISTINCT CASE WHEN wr2.status = 'Paid' THEN wr2.id ELSE NULL END) AS cases_received,
             (SELECT status FROM welfare_requests WHERE member_id = %s ORDER BY created_at DESC LIMIT 1) AS latest_status
-        FROM ledger_transactions lt
-        LEFT JOIN welfare_requests wr1 ON wr1.member_id = %s
-        LEFT JOIN welfare_requests wr2 ON wr2.member_id = %s AND wr2.status = 'Paid'
-        WHERE lt.member_id = %s;
+        FROM welfare_requests wr1
+        LEFT JOIN welfare_requests wr2 ON wr2.member_id = wr1.member_id AND wr2.status = 'Paid'
+        WHERE wr1.member_id = %s;
         """,
-        params=(member_id, member_id, member_id, member_id),
+        params=(member_id, member_id),
         fetch=True,
     ) or []
 
     row = rows[0] if rows else {}
-    credits = float(row.get("credits") or 0.0)
-    contributions = float(row.get("contributions") or 0.0)
+    ledger_totals = get_member_welfare_ledger_totals(member_id)
 
     return {
-        "welfare_balance": round(get_member_welfare_reserve_balance(member_id), 2),
-        "total_contributions": round(contributions, 2),
+        "welfare_balance": round(ledger_totals["welfare_balance"], 2),
+        "total_contributions": round(ledger_totals["contributions"], 2),
         "cases_requested": int(row.get("cases_requested") or 0),
         "cases_received": int(row.get("cases_received") or 0),
         "status": row.get("latest_status") or "No request",
-        "last_contribution_date": row.get("last_contribution_date"),
+        "last_contribution_date": ledger_totals["last_contribution_date"],
     }
 
 
@@ -1081,14 +1072,15 @@ def _get_welfare_report_stats() -> dict:
             COUNT(*) FILTER (WHERE status IN ('Approved by Welfare Officer', 'Pending Chairperson Approval', 'Approved by Chairperson', 'Pending Treasurer Payment', 'Paid')) AS approved,
             COUNT(*) FILTER (WHERE status = 'Rejected') AS rejected,
             COUNT(*) FILTER (WHERE status = 'Paid') AS paid,
-            COUNT(*) FILTER (WHERE status IN ('Pending Welfare Officer Review', 'Pending Chairperson Approval', 'Pending Treasurer Payment')) AS outstanding,
-            COALESCE(SUM(payment_amount) FILTER (WHERE status = 'Paid'), 0) AS total_paid
+            COUNT(*) FILTER (WHERE status IN ('Pending Welfare Officer Review', 'Pending Chairperson Approval', 'Pending Treasurer Payment')) AS outstanding
         FROM welfare_requests;
         """,
         params=None,
         fetch=True,
     ) or []
-    return rows[0] if rows else {}
+    stats = rows[0] if rows else {}
+    stats.update(get_welfare_fund_totals())
+    return stats
 
 
 @st.cache_data(ttl=300)
@@ -1288,6 +1280,29 @@ def process_welfare_payment(request_id: int, treasurer_id: str, treasurer_name: 
     beneficiary_name = request.get("member_name")
 
     ensure_member_balance_adjustments_table()
+    eligible_rows = execute_query(
+        "SELECT member_id, full_name, status FROM members ORDER BY full_name;",
+        params=None,
+        fetch=True,
+    ) or []
+    contributions = {
+        str(row["member_id"]): float(WELFARE_PAYMENT_AMOUNT)
+        for row in eligible_rows
+        if row.get("member_id")
+        and str(row["member_id"]) != str(beneficiary_id)
+        and _is_welfare_contribution_eligible(row.get("status"))
+    }
+    post_welfare_contribution(
+        contributions=contributions,
+        reference=f"welfare-contribution:{request_id}",
+        approved_by=treasurer_id,
+    )
+    post_welfare_payment(
+        beneficiary_id=str(beneficiary_id),
+        amount=float(WELFARE_PAYMENT_AMOUNT),
+        reference=f"welfare-payment:{request_id}",
+        approved_by=treasurer_id,
+    )
     try:
         with get_conn_from_pool() as conn:
             cur = conn.cursor()
@@ -1297,9 +1312,9 @@ def process_welfare_payment(request_id: int, treasurer_id: str, treasurer_name: 
                     (),
                 )
                 eligible_members = cur.fetchall()
-                payment_reference = f"WEL-{request.get('case_number')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-                receipt_number = f"RCPT-{request.get('case_number')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-                transaction_id = f"TXN-{request.get('case_number')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                payment_reference = f"WEL-{request.get('case_number')}-{request_id}"
+                receipt_number = f"RCPT-{request.get('case_number')}-{request_id}"
+                transaction_id = f"TXN-{request.get('case_number')}-{request_id}"
                 payment_timestamp = datetime.utcnow()
                 receipt_text = (
                     f"Welfare Support Payment Receipt\n"
@@ -1325,48 +1340,13 @@ def process_welfare_payment(request_id: int, treasurer_id: str, treasurer_name: 
                     if not _is_welfare_contribution_eligible(member_status):
                         continue
                     _ensure_member_welfare_account(member_id, member_name)
-                    current_balance = float(get_member_welfare_summary(member_id).get("welfare_balance", 0.0))
-                    cur.execute(
-                        "INSERT INTO ledger_transactions (member_id, member_name, transaction_type, amount, related_request_id, description, reference) VALUES (%s, %s, %s, %s, %s, %s, %s);",
-                        (member_id, member_name, "Welfare Contribution", -WELFARE_PAYMENT_AMOUNT, request_id, f"Contribution toward {request.get('case_number')}", payment_reference),
+                    _create_notification(
+                        "member",
+                        member_id,
+                        "Thank you for your welfare contribution",
+                        f"Thank you for supporting {beneficiary_name} through your Welfare Contribution. Your UGX 20,000 contribution has been recorded successfully.",
+                        request_id,
                     )
-                    cur.execute(
-                        "INSERT INTO member_balance_adjustments (member_id, adjustment_type, amount, reference, reference_id, created_on) VALUES (%s, %s, %s, %s, %s, %s);",
-                        (member_id, "welfare_contribution", WELFARE_PAYMENT_AMOUNT, payment_reference, request_id, payment_timestamp.date()),
-                    )
-                    if _should_suspend_for_zero_balance(current_balance, WELFARE_PAYMENT_AMOUNT):
-                        execute_query(
-                            "UPDATE members SET status = %s WHERE member_id = %s;",
-                            params=("Suspended", member_id),
-                            fetch=False,
-                        )
-                        _create_notification(
-                            "member",
-                            member_id,
-                            "Welfare account suspended",
-                            "Your welfare account has been suspended because your balance is zero and the required contribution could not be processed.",
-                            request_id,
-                        )
-                        _create_notification(
-                            "role",
-                            "Treasurer",
-                            "Member welfare account suspended",
-                            f"{member_name or member_id} was suspended because their welfare balance is zero and the required contribution could not be processed.",
-                            request_id,
-                        )
-                    else:
-                        _create_notification(
-                            "member",
-                            member_id,
-                            "Thank you for your welfare contribution",
-                            f"Thank you for supporting {beneficiary_name} through your Welfare Contribution. Your UGX 20,000 contribution has been recorded successfully.",
-                            request_id,
-                        )
-
-                cur.execute(
-                    "INSERT INTO ledger_transactions (member_id, member_name, transaction_type, amount, related_request_id, description, reference) VALUES (%s, %s, %s, %s, %s, %s, %s);",
-                    (beneficiary_id, beneficiary_name, "Welfare Support Credit", WELFARE_PAYMENT_AMOUNT, request_id, f"Welfare support for {request.get('case_number')}", payment_reference),
-                )
 
                 cur.execute(
                     "UPDATE welfare_requests SET status = %s, current_stage = %s, payment_reference = %s, payment_date = %s, paid_by = %s, payment_amount = %s, updated_at = %s WHERE id = %s;",
@@ -1868,11 +1848,14 @@ def render_welfare_support_page() -> None:
                         )
                         if st.button("Pay welfare support"):
                             request_id = _safe_int(request.get("id"))
-                            ok, payment_reference, message = process_welfare_payment(request_id, user_id or "system", user_name)
-                            if ok:
-                                st.success(f"Payment processed. Reference: {payment_reference}")
-                            else:
-                                st.error(message or "Payment failed")
+                            try:
+                                ok, payment_reference, message = process_welfare_payment(request_id, user_id or "system", user_name)
+                                if ok:
+                                    st.success(f"Payment processed. Reference: {payment_reference}")
+                                else:
+                                    st.error(message or "Payment failed")
+                            except InsufficientFundsError as exc:
+                                st.error(f"Insufficient Funds: {exc} A member must settle the contribution by an approved cash/mobile-money deposit first.")
                     else:
                         st.info("Leadership review tools are available to Welfare, Chairperson, and Treasurer roles.")
                 with col_b:

@@ -4,17 +4,17 @@ from datetime import datetime
 from typing import List, Tuple
 
 from src.database.connection import cached_read_query, execute_query
-from src.utils.balances import get_effective_pool_balance
+from src.utils.balances import (
+    get_effective_pool_balance,
+    get_subscription_ledger,
+    get_subscription_member_count,
+)
 
 
 @st.cache_data(ttl=300)
 def fetch_portfolio_metrics() -> dict:
     total_paid = get_effective_pool_balance()
-    rows = cached_read_query(
-        "SELECT COUNT(DISTINCT member_id) AS member_count FROM subscriptions;",
-        params=None,
-    )
-    member_count = int(rows[0].get("member_count") or 0) if rows else 0
+    member_count = get_subscription_member_count()
     return {"total_paid": total_paid, "member_count": member_count}
 
 
@@ -33,38 +33,13 @@ def fetch_member_dropdown_options() -> List[Tuple[str, str]]:
 def fetch_subscription_ledger(limit: int = 20, expected_per_month: int = 20000, months_elapsed: int | None = None) -> pd.DataFrame:
     if months_elapsed is None:
         months_elapsed = datetime.today().month
-    # Aggregate member payment totals and withdrawals in a single query to avoid
-    # N+1 queries when computing per-member balances.
-    rows = cached_read_query(
-        """
-        WITH paid_months AS (
-            SELECT member_id, COUNT(DISTINCT billing_month) AS paid_months
-            FROM subscriptions
-            WHERE EXTRACT(YEAR FROM billing_month) = EXTRACT(YEAR FROM CURRENT_DATE)
-            GROUP BY member_id
-        ),
-        total_paid AS (
-            SELECT member_id, COALESCE(SUM(amount_paid),0) AS total_paid
-            FROM subscriptions
-            GROUP BY member_id
-        ),
-        total_withdrawn AS (
-            SELECT member_id, COALESCE(SUM(amount),0) AS total_withdrawn
-            FROM member_balance_adjustments
-            WHERE adjustment_type = 'withdrawal'
-            GROUP BY member_id
-        )
-        SELECT m.member_id, m.full_name, COALESCE(pm.paid_months,0) AS paid_months,
-               COALESCE(tp.total_paid,0) AS total_paid, COALESCE(tw.total_withdrawn,0) AS total_withdrawn
-        FROM members m
-        LEFT JOIN paid_months pm ON pm.member_id = m.member_id
-        LEFT JOIN total_paid tp ON tp.member_id = m.member_id
-        LEFT JOIN total_withdrawn tw ON tw.member_id = m.member_id
-        ORDER BY m.full_name
-        LIMIT %s;
-        """,
-        params=(limit,),
+    rows = get_subscription_ledger(
+        datetime.today().date(),
+        expected_per_month=expected_per_month,
     )
+    rows.sort(key=lambda row: row["full_name"])
+    if limit is not None:
+        rows = rows[:limit]
     if not rows:
         return pd.DataFrame(
             [
@@ -80,11 +55,8 @@ def fetch_subscription_ledger(limit: int = 20, expected_per_month: int = 20000, 
 
     ledger = []
     for row in rows:
-        member_id = row.get("member_id")
-        total_paid = float(row.get("total_paid") or 0.0)
-        total_withdrawn = float(row.get("total_withdrawn") or 0.0)
-        paid = max(total_paid - total_withdrawn, 0.0)
-        arrears = max(0.0, expected_per_month * months_elapsed - paid)
+        paid = float(row.get("total_paid") or 0.0)
+        arrears = float(row.get("arrears") or 0.0)
         status = ("Current" if arrears <= 0 else f"UGX {int(round(arrears)):,} overdue")
         ledger.append(
             {

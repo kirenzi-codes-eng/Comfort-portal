@@ -15,7 +15,6 @@ import io
 from src.database.connection import DatabaseUnavailableError
 from src.views.home import home_view
 from src.utils.pwa import get_logo_url
-from src.utils.reminder_scheduler import start_periodic_reminder_worker
 
 ROOT = Path(__file__).resolve().parent
 STYLE_CSS_PATH = ROOT / "style.css"
@@ -25,9 +24,6 @@ APP_SHORT_NAME = "Comfort Portal"
 APP_THEME_COLOR = "#2563eb"
 
 SRC = ROOT / "src"
-
-start_periodic_reminder_worker(interval_minutes=15)
-
 
 def load_css() -> None:
     if not STYLE_CSS_PATH.exists():

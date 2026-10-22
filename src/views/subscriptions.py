@@ -2,6 +2,7 @@ import os
 import re
 import io
 import base64
+import uuid
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
@@ -17,7 +18,20 @@ from src.database.connection import cached_read_query, execute_query
 from src.utils.audit import record_audit_event
 from src.utils.membership import get_membership_status_for_db
 from src.utils.notifications import create_notification
-from src.utils.balances import get_effective_member_balance, get_member_balance_breakdown
+from src.utils.balances import (
+    get_effective_member_balance,
+    MAX_MONTHLY_SUBSCRIPTION,
+    get_month_subscription_remaining,
+    get_month_subscription_total,
+    get_member_balance_breakdown,
+    get_member_loan_accounts,
+    get_member_subscription_months,
+    get_member_subscription_arrears,
+    get_subscription_history,
+    get_subscription_summary,
+    post_subscription_payment,
+    record_loan_repayment,
+)
 from src.utils.timezone import today_in_uganda
 
 
@@ -27,7 +41,7 @@ PROOF_STATUS_PENDING = "Pending Verification"
 PROOF_STATUS_VERIFIED = "Verified"
 PROOF_STATUS_REJECTED = "Rejected"
 PROOF_STATUS_CLARIFICATION = "Clarification Requested"
-MAX_SUBSCRIPTION_AMOUNT = 20000.0
+MAX_SUBSCRIPTION_AMOUNT = MAX_MONTHLY_SUBSCRIPTION
 
 
 def get_subscription_proof_access_role(user_role: str | None) -> str:
@@ -286,37 +300,7 @@ def has_existing_subscription_proof(member_id: str, subscription_month: int, sub
 def get_member_monthly_subscription_total(member_id: str, subscription_month: int, subscription_year: int) -> float:
     """Return the current total amount paid or pending for the member in a given month/year."""
     _ensure_subscription_proof_table()
-    billing_month = date(subscription_year, subscription_month, 1)
-    next_month = date(
-        subscription_year + (subscription_month == 12),
-        1 if subscription_month == 12 else subscription_month + 1,
-        1,
-    )
-
-    subscription_rows = execute_query(
-        """
-        SELECT COALESCE(SUM(amount_paid), 0) AS total_paid
-        FROM subscriptions
-        WHERE member_id = %s AND billing_month >= %s AND billing_month < %s;
-        """,
-        params=(member_id, billing_month, next_month),
-        fetch=True,
-    ) or []
-    existing_total = float(subscription_rows[0].get("total_paid", 0) if subscription_rows else 0)
-
-    proof_rows = execute_query(
-        """
-        SELECT COALESCE(SUM(amount_paid), 0) AS total_pending
-        FROM subscription_payment_proofs
-        WHERE member_id = %s AND subscription_month = %s AND subscription_year = %s
-          AND verification_status <> %s;
-        """,
-        params=(member_id, subscription_month, subscription_year, PROOF_STATUS_REJECTED),
-        fetch=True,
-    ) or []
-    pending_total = float(proof_rows[0].get("total_pending", 0) if proof_rows else 0)
-
-    return existing_total + pending_total
+    return get_month_subscription_total(member_id, subscription_month, subscription_year)
 
 
 def update_subscription_proof_verification(proof_id: int | str, verifier: str, new_status: str, verification_comment: str | None = None) -> bool:
@@ -337,6 +321,26 @@ def update_subscription_proof_verification(proof_id: int | str, verifier: str, n
 
         proof = proof_rows[0]
         was_verified = proof.get("verification_status") == PROOF_STATUS_VERIFIED
+        if new_status == PROOF_STATUS_VERIFIED:
+            billing_month = date(int(proof["subscription_year"]), int(proof["subscription_month"]), 1)
+            proof_reference = f"subscription-proof:{proof_id}"
+            post_subscription_payment(
+                member_id=str(proof["member_id"]),
+                amount=float(proof["amount_paid"]),
+                reference=proof_reference,
+                approved_by=str(st.session_state.get("user_id") or verifier),
+                billing_date=billing_month,
+            )
+            if not was_verified:
+                execute_query(
+                    """
+                    INSERT INTO subscriptions (member_id, billing_month, amount_paid, status)
+                    VALUES (%s, %s, %s, 'Paid');
+                    """,
+                    params=(proof["member_id"], billing_month, proof["amount_paid"]),
+                    fetch=False,
+                )
+            check_and_update_member_status(str(proof["member_id"]))
         execute_query(
             """
             UPDATE subscription_payment_proofs
@@ -349,21 +353,6 @@ def update_subscription_proof_verification(proof_id: int | str, verifier: str, n
             params=(new_status, verifier, datetime.utcnow(), verification_comment, proof_id),
             fetch=False,
         )
-        if new_status == PROOF_STATUS_VERIFIED and not was_verified:
-            billing_month = date(int(proof["subscription_year"]), int(proof["subscription_month"]), 1)
-            execute_query(
-                """
-                INSERT INTO subscriptions (member_id, billing_month, amount_paid, status)
-                VALUES (%s, %s, %s, 'Paid');
-                """,
-                params=(
-                    proof["member_id"],
-                    billing_month,
-                    proof["amount_paid"],
-                ),
-                fetch=False,
-            )
-            check_and_update_member_status(str(proof["member_id"]))
         record_audit_event(
             entity_type="subscription_proof",
             entity_id=str(proof_id),
@@ -783,13 +772,13 @@ def render_payment_proof_form(member_id: str, member_name: str) -> None:
             st.error(f"The maximum allowed subscription payment is UGX {int(MAX_SUBSCRIPTION_AMOUNT):,}.")
             return
 
-        monthly_total = get_member_monthly_subscription_total(member_id, subscription_month, subscription_year)
-        if monthly_total + amount_paid > MAX_SUBSCRIPTION_AMOUNT:
-            allowed_amount = max(0.0, MAX_SUBSCRIPTION_AMOUNT - monthly_total)
+        remaining = get_month_subscription_remaining(member_id, subscription_month, subscription_year)
+        if amount_paid > remaining:
+            monthly_total = get_member_monthly_subscription_total(member_id, subscription_month, subscription_year)
             st.error(
                 f"This member already has UGX {int(monthly_total):,} recorded or pending for "
                 f"{date(subscription_year, subscription_month, 1).strftime('%B %Y')}. "
-                f"Please submit up to UGX {int(allowed_amount):,} for this month."
+                f"Please submit up to UGX {int(remaining):,} for this month."
             )
             return
 
@@ -981,14 +970,8 @@ def check_and_update_member_status(member_id: str) -> None:
     )
     join_date = member_rows[0].get("join_date") if member_rows else None
 
-    metrics_rows = execute_query(
-        "SELECT COALESCE(SUM(amount_paid),0) AS total_paid, COALESCE(SUM(CASE WHEN status = 'Pending' THEN amount_paid ELSE 0 END),0) AS pending_paid FROM subscriptions WHERE member_id = %s;",
-        params=(member_id,),
-        fetch=True,
-    )
-    metrics = metrics_rows[0] if metrics_rows else {}
-    saving_balance = float(metrics.get("total_paid") or 0)
-    arrears_balance = float(metrics.get("pending_paid") or 0)
+    saving_balance = get_effective_member_balance(member_id)
+    arrears_balance = get_member_subscription_arrears(member_id, today_in_uganda())
 
     new_status = get_membership_status_for_db(join_date, saving_balance=saving_balance, arrears_balance=arrears_balance)
     try:
@@ -1057,46 +1040,23 @@ def member_view(member_id: str, show_proof_section: bool = True, user_role: str 
     today = today_in_uganda()
     current_year = today.year
     current_month = today.month
-    monthly_expected = 20000
-
-    rows = execute_query(
-        "SELECT billing_month, amount_paid, status FROM subscriptions WHERE member_id = %s AND EXTRACT(YEAR FROM billing_month) = %s;",
-        params=(member_id, current_year),
-        fetch=True,
-    )
     effective_balance = get_effective_member_balance(member_id)
+    total_arrears = get_member_subscription_arrears(member_id, today)
     balance_breakdown = get_member_balance_breakdown(member_id)
 
-    payments_by_month = {}
-    status_by_month = {}
-    if rows:
-        for r in rows:
-            bm = r.get("billing_month")
-            if isinstance(bm, (datetime, date)):
-                key = bm.month
-            else:
-                try:
-                    parsed = datetime.fromisoformat(str(bm))
-                    key = parsed.month
-                except Exception:
-                    continue
-            payments_by_month[key] = payments_by_month.get(key, 0.0) + float(r.get("amount_paid") or 0.0)
-            status_by_month[key] = r.get("status")
+    payments_by_month = get_member_subscription_months(member_id, current_year, current_month)
 
     ledger = []
-    total_contributed = 0.0
-    total_arrears = 0.0
     for month_num in range(1, current_month + 1):
         month_label = datetime(current_year, month_num, 1).strftime("%b")
-        contributed = payments_by_month.get(month_num, 0.0)
-        expected = float(monthly_expected)
-        arrears = max(0.0, expected - contributed)
-        total_contributed += contributed
-        total_arrears += arrears
+        month_record = payments_by_month[month_num]
+        contributed = month_record["paid"]
+        expected = month_record["expected"]
+        arrears = month_record["arrears"]
         if arrears <= 0:
             status = render_status_badge("Paid", 0.0)
         else:
-            status = render_status_badge(status_by_month.get(month_num, "Arrears"), arrears)
+            status = render_status_badge("Arrears", arrears)
         ledger.append(
             {
                 "Month": month_label,
@@ -1129,6 +1089,7 @@ def member_view(member_id: str, show_proof_section: bool = True, user_role: str 
         render_payment_proof_form(member_id, st.session_state.get("user_name") or "Member")
         render_member_payment_history(member_id, st.session_state.get("user_name") or "Member")
 
+    rows = get_subscription_history(member_id=member_id) or []
     if rows:
         history_rows = []
         for r in rows:
@@ -1258,15 +1219,23 @@ def treasurer_view(user_role: str):
                     else:
                         member_id = member_options[selected]
                         bm = billing_month.replace(day=1)
-                        existing_total = get_member_monthly_subscription_total(member_id, bm.month, bm.year)
-                        if existing_total + amount > MAX_SUBSCRIPTION_AMOUNT:
-                            allowed_amount = max(0.0, MAX_SUBSCRIPTION_AMOUNT - existing_total)
+                        remaining = get_month_subscription_remaining(member_id, bm.month, bm.year)
+                        if amount > remaining:
+                            existing_total = get_member_monthly_subscription_total(member_id, bm.month, bm.year)
                             st.error(
                                 f"This member already has UGX {int(existing_total):,} recorded or pending for {bm.strftime('%B %Y')}. "
-                                f"You can only post up to UGX {int(allowed_amount):,} more for this month."
+                                f"You can only post up to UGX {int(remaining):,} more for this month."
                             )
                         else:
                             try:
+                                payment_reference = f"treasurer-subscription:{member_id}:{bm.isoformat()}:{datetime.utcnow().timestamp()}"
+                                post_subscription_payment(
+                                    member_id=member_id,
+                                    amount=float(amount),
+                                    reference=payment_reference,
+                                    approved_by=str(st.session_state.get("user_id") or st.session_state.get("user_name") or "Treasurer"),
+                                    billing_date=bm,
+                                )
                                 execute_query(
                                     "INSERT INTO subscriptions (member_id, billing_month, amount_paid, status) VALUES (%s, %s, %s, %s);",
                                     params=(member_id, bm, amount, "Paid"),
@@ -1282,46 +1251,60 @@ def treasurer_view(user_role: str):
             with st.container():
                 st.markdown("<div class='form-panel brown'>", unsafe_allow_html=True)
                 st.markdown("<div class='form-panel-title'>Loan Repayment</div>", unsafe_allow_html=True)
+                loan_member = st.selectbox("Member for Loan Repayment", options=list(member_options.keys()), key="loan_member")
+                member_id = member_options[loan_member]
+                try:
+                    loan_rows = [
+                        loan for loan in get_member_loan_accounts(member_id)
+                        if loan.get("outstanding") is not None and loan["outstanding"] > 0
+                    ]
+                except Exception as exc:
+                    st.error(f"Unable to load outstanding loans for repayment: {exc}")
+                    loan_rows = []
+                loan_choices = {
+                    f"Loan #{loan['loan_id']} — outstanding UGX {loan['outstanding']:,.2f}": int(loan["loan_id"])
+                    for loan in loan_rows
+                }
+                if not loan_choices:
+                    loan_choices = {"No outstanding ledger-backed loan": None}
                 with st.form("loan_repayment_form"):
-                    loan_member = st.selectbox("Member for Loan Repayment", options=list(member_options.keys()), key="loan_member")
+                    selected_loan = st.selectbox(
+                        "Loan to Repay",
+                        options=list(loan_choices.keys()),
+                        disabled=not loan_rows,
+                    )
                     repay_amount = st.number_input("Repayment Amount (UGX)", min_value=0.0, value=0.0, step=100.0)
                     submit_repay = st.form_submit_button("Apply Repayment")
 
                 if submit_repay:
-                    member_id = member_options[loan_member]
+                    loan_id = loan_choices[selected_loan]
                     if repay_amount <= 0:
                         st.toast("Enter a positive repayment amount.", icon="⚠️")
+                    elif loan_id is None:
+                        st.info("No loan with an outstanding ledger balance was found for this member.")
                     else:
                         try:
-                            loan_rows = execute_query(
-                                "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated "
-                                "FROM loans "
-                                "WHERE member_id = %s AND status IN ('Active','Approved') "
-                                "ORDER BY approved_date DESC NULLS LAST, applied_date DESC, loan_id DESC LIMIT 1;",
-                                params=(member_id,),
-                                fetch=True,
+                            from src.views.loans import update_interest_accumulation
+
+                            if not update_interest_accumulation():
+                                st.error("Repayment was not posted because the loan interest update did not complete.")
+                                st.stop()
+                            repayment = record_loan_repayment(
+                                loan_id=loan_id,
+                                member_id=member_id,
+                                amount=float(repay_amount),
+                                reference=f"loan-repayment:{loan_id}:{uuid.uuid4()}",
+                                approved_by=str(st.session_state.get("user_id") or st.session_state.get("user_name") or "Treasurer"),
                             )
-                            if not loan_rows:
-                                st.info("No active approved loan found for this member.")
-                            else:
-                                loan = loan_rows[0]
-                                loan_id = loan["loan_id"]
-                                outstanding = float(loan.get("outstanding_balance") or 0.0)
-                                interest_accumulated = float(loan.get("interest_accumulated") or 0.0)
-                                principal = max(0.0, outstanding - interest_accumulated)
-
-                                payment_to_principal = min(repay_amount, principal)
-                                overpayment = max(0.0, repay_amount - payment_to_principal)
-                                new_principal = principal - payment_to_principal
-                                new_interest = max(0.0, interest_accumulated - overpayment)
-                                new_outstanding = new_principal + new_interest
-
-                                execute_query(
-                                    "UPDATE loans SET outstanding_balance = %s, interest_accumulated = %s, last_payment_applied_at = %s WHERE loan_id = %s;",
-                                    params=(new_outstanding, new_interest, date.today(), loan_id),
-                                    fetch=False,
+                            if repayment["overpayment_credit"] > 0:
+                                st.success(
+                                    f"Repayment posted. UGX {repayment['overpayment_credit']:,.2f} "
+                                    "was recorded as member credit."
                                 )
-                                st.toast("Repayment applied to active loan.", icon="✅")
+                            elif repayment["principal_remaining"] <= 0:
+                                st.success("Repayment posted and the loan principal is fully repaid.")
+                            else:
+                                st.toast("Repayment posted: interest first, then principal.", icon="✅")
                         except Exception as e:
                             st.error(f"Failed to apply repayment: {e}")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1374,11 +1357,7 @@ def treasurer_view(user_role: str):
     if user_role == "Secretary":
         try:
             history_rows = []
-            rows = execute_query(
-                "SELECT billing_month, amount_paid, status FROM subscriptions WHERE member_id = %s ORDER BY billing_month;",
-                params=(selected_member_id,),
-                fetch=True,
-            ) or []
+            rows = get_subscription_history(member_id=selected_member_id)
 
             for r in rows:
                 bm = r.get("billing_month")
@@ -1417,16 +1396,7 @@ def fetch_recent_subscriptions(days: int = 7) -> list[dict]:
 @st.cache_data(ttl=30)
 def fetch_recent_subscriptions_cached(days: int = 7) -> list[dict]:
     cutoff_date = today_in_uganda() - timedelta(days=days)
-    rows = execute_query(
-        "SELECT s.member_id, m.full_name, s.billing_month, s.amount_paid, s.status "
-        "FROM subscriptions s "
-        "JOIN members m ON s.member_id = m.member_id "
-        "WHERE s.billing_month >= %s "
-        "ORDER BY s.billing_month DESC;",
-        params=(cutoff_date,),
-        fetch=True,
-    )
-    return rows or []
+    return get_subscription_history(cycle_start=cutoff_date)
 
 
 def fetch_subscription_summary(year: int) -> dict[str, float]:
@@ -1436,18 +1406,7 @@ def fetch_subscription_summary(year: int) -> dict[str, float]:
 
 @st.cache_data(ttl=60)
 def fetch_subscription_summary_cached(year: int) -> dict[str, float]:
-    rows = execute_query(
-        "SELECT COUNT(DISTINCT member_id) AS members_with_payments, COALESCE(SUM(amount_paid), 0) AS total_paid "
-        "FROM subscriptions WHERE EXTRACT(YEAR FROM billing_month) = %s;",
-        params=(year,),
-        fetch=True,
-    )
-    if not rows:
-        return {"members_with_payments": 0.0, "total_paid": 0.0}
-    return {
-        "members_with_payments": float(rows[0].get("members_with_payments", 0) or 0),
-        "total_paid": float(rows[0].get("total_paid", 0) or 0),
-    }
+    return get_subscription_summary(year)
 
 
 def chairperson_monitor_view():

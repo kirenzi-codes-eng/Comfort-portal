@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from src.utils import reminder_scheduler
 
@@ -18,7 +18,7 @@ class ReminderSchedulerTests(unittest.TestCase):
 
     def test_start_periodic_reminder_worker_skips_duplicate_thread(self):
         reminder_scheduler._worker_started = True
-        reminder_scheduler._worker_thread = object()
+        reminder_scheduler._worker_thread = Mock(is_alive=Mock(return_value=True))
         reminder_scheduler._worker_stop_event = None
 
         with patch("src.utils.reminder_scheduler.threading.Thread") as mock_thread:

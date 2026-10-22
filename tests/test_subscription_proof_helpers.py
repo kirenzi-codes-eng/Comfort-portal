@@ -32,20 +32,29 @@ def test_validate_subscription_proof_upload_rejects_unsupported_type_and_large_f
 
 
 def test_monthly_subscription_total_includes_all_dates_in_month(monkeypatch):
+    clear_cache = getattr(get_member_monthly_subscription_total, "clear", None)
+    if clear_cache:
+        clear_cache()
     monkeypatch.setattr("src.views.subscriptions._ensure_subscription_proof_table", lambda: None)
+    monkeypatch.setattr("src.utils.balances.ensure_accounting_schema", lambda: None)
 
     queries = []
 
     def fake_execute_query(query, params=None, fetch=False):
         queries.append((query, params, fetch))
-        if "FROM subscriptions" in query:
-            return [{"total_paid": 20000.0}]
+        if "accounting_journal_entries" in query:
+            return [{"total": 20000.0}]
+        if "FROM subscriptions s" in query:
+            return []
         return [{"total_pending": 0.0}]
 
-    monkeypatch.setattr("src.views.subscriptions.execute_query", fake_execute_query)
+    monkeypatch.setattr("src.utils.balances.execute_query", fake_execute_query)
 
     assert get_member_monthly_subscription_total("M1", 2, 2026) == 20000.0
     assert queries[0][1] == ("M1", date(2026, 2, 1), date(2026, 3, 1))
+    assert "FROM subscriptions s" in queries[1][0]
+    assert queries[1][1] == ("M1", date(2026, 2, 1), date(2026, 3, 1))
+    assert queries[2][1] == ("M1", 2, 2026)
 
 
 def test_verifying_proof_posts_subscription_for_selected_month(monkeypatch):

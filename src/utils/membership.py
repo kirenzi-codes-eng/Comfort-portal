@@ -79,6 +79,8 @@ def get_membership_status_for_db(join_date: Optional[date | str | datetime], sav
 
 def sanitize_member_status_records() -> int:
     """Convert stored 'Inactive' member statuses to valid membership statuses."""
+    from src.utils.balances import get_effective_member_balance, get_member_subscription_arrears
+
     rows = execute_query(
         "SELECT member_id, join_date FROM members WHERE lower(status) = 'inactive';",
         params=None,
@@ -90,15 +92,8 @@ def sanitize_member_status_records() -> int:
         member_id = row.get("member_id")
         join_date = row.get("join_date")
 
-        metrics_rows = execute_query(
-            "SELECT COALESCE(SUM(amount_paid),0) AS total_paid, COALESCE(SUM(CASE WHEN status = 'Pending' THEN amount_paid ELSE 0 END),0) AS pending_paid FROM subscriptions WHERE member_id = %s;",
-            params=(member_id,),
-            fetch=True,
-        ) or [{"total_paid": 0, "pending_paid": 0}]
-
-        metrics = metrics_rows[0] if metrics_rows else {"total_paid": 0, "pending_paid": 0}
-        saving_balance = float(metrics.get("total_paid") or 0)
-        arrears_balance = float(metrics.get("pending_paid") or 0)
+        saving_balance = get_effective_member_balance(str(member_id))
+        arrears_balance = get_member_subscription_arrears(str(member_id), date.today())
 
         new_status = get_membership_status_for_db(join_date, saving_balance=saving_balance, arrears_balance=arrears_balance)
         if new_status and new_status != "Inactive":

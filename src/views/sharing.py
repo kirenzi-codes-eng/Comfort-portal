@@ -1,6 +1,6 @@
 import io
 from datetime import datetime, date, timedelta
-from typing import List, Dict
+from typing import Any, List, Dict
 
 import pandas as pd
 import streamlit as st
@@ -10,7 +10,14 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 from src.database.connection import execute_query
-from src.utils.balances import get_member_balance_breakdown
+from src.utils.balances import (
+    calculate_cycle_payouts,
+    get_member_balance_breakdown,
+    get_member_balances,
+    get_verified_cash_interest,
+    post_cycle_allocations,
+    post_member_sharing_payout,
+)
 from src.views.home import parse_db_datetime
 
 
@@ -34,11 +41,7 @@ def _today_iso() -> str:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_total_interest() -> float:
-    from src.views.loans import update_interest_accumulation
-
-    update_interest_accumulation()
-    rows = execute_query("SELECT COALESCE(SUM(interest_accumulated),0) AS total_interest FROM loans;", params=None, fetch=True)
-    return float(rows[0]["total_interest"] or 0) if rows else 0.0
+    return float(get_verified_cash_interest())
 
 
 def fetch_member_count() -> int:
@@ -48,57 +51,39 @@ def fetch_member_count() -> int:
 
 @st.cache_data(show_spinner=False, ttl=60)
 def fetch_member_count_cached() -> int:
-    rows = execute_query("SELECT COUNT(*) AS cnt FROM members;", params=None, fetch=True)
-    return int(rows[0]["cnt"]) if rows else 0
+    return int(calculate_dividends()["member_count"])
 
 
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_member_interest(member_id: str) -> float:
-    from src.views.loans import update_interest_accumulation
-
-    update_interest_accumulation()
-    rows = execute_query(
-        "SELECT COALESCE(SUM(interest_accumulated),0) AS member_interest FROM loans WHERE member_id = %s;",
-        params=(member_id,),
-        fetch=True,
-    )
-    return float(rows[0]["member_interest"] or 0) if rows else 0.0
+    rows = get_verified_cash_interest(by_member=True)
+    return float(rows.get(member_id, 0.0)) if isinstance(rows, dict) else 0.0
 
 
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_total_savings(member_id: str) -> float:
-    ensure_sharing_tables()
-    rows = execute_query(
-        "SELECT COALESCE(SUM(amount_paid),0) AS total FROM subscriptions WHERE member_id = %s;",
-        params=(member_id,),
-        fetch=True,
-    )
-    contributions = float(rows[0]["total"] or 0) if rows else 0.0
-
-    reduction_rows = execute_query(
-        "SELECT COALESCE(SUM(amount),0) AS total_withdrawn FROM member_balance_adjustments WHERE member_id = %s AND adjustment_type = 'withdrawal';",
-        params=(member_id,),
-        fetch=True,
-    )
-    withdrawals = float(reduction_rows[0]["total_withdrawn"] or 0) if reduction_rows else 0.0
-    return max(contributions - withdrawals, 0.0)
+    return get_member_balances(member_id)["total_balance"]
 
 
-@st.cache_data(show_spinner=False, ttl=30)
-def calculate_dividends() -> Dict[str, float]:
-    total_interest = fetch_total_interest()
-    member_rebate_pool = total_interest * 0.25
-    admin_pool = total_interest * 0.15
-    global_pool = total_interest * 0.60
-    member_count = fetch_member_count() or 1
-    global_per_member = global_pool / member_count
+def _cycle_bounds() -> tuple[date, date]:
+    workflow = get_sharing_workflow()
+    start = _coerce_sharing_date(workflow.get("activated_on")) or datetime.utcnow().date()
+    end = _coerce_sharing_date(workflow.get("deactivated_on")) or datetime.utcnow().date()
+    return start, max(start, end)
+
+
+def calculate_dividends() -> Dict[str, Any]:
+    cycle_start, cycle_end = _cycle_bounds()
+    payouts = calculate_cycle_payouts(cycle_start, cycle_end)
     return {
-        "total_interest": total_interest,
-        "member_rebate_pool": member_rebate_pool,
-        "admin_pool": admin_pool,
-        "global_pool": global_pool,
-        "global_per_member": global_per_member,
-        "member_count": member_count,
+        "total_interest": payouts["interest_collected"],
+        "member_rebate_pool": payouts["borrower_rebate_pool"],
+        "admin_pool": payouts["admin_reserve"],
+        "global_pool": payouts["member_sharing_pool"],
+        "member_count": payouts["eligible_count"],
+        "payouts": payouts["payouts"],
+        "cycle_start": payouts["cycle_start"],
+        "cycle_end": payouts["cycle_end"],
     }
 
 
@@ -112,9 +97,15 @@ def ensure_sharing_tables() -> None:
             id INTEGER PRIMARY KEY DEFAULT 1,
             active BOOLEAN NOT NULL DEFAULT FALSE,
             activated_on DATE,
+            deactivated_on DATE,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
+        params=None,
+        fetch=False,
+    )
+    execute_query(
+        "ALTER TABLE sharing_workflow_state ADD COLUMN IF NOT EXISTS deactivated_on DATE;",
         params=None,
         fetch=False,
     )
@@ -226,17 +217,23 @@ def invalidate_sharing_caches() -> None:
 def load_sharing_workflow_from_db() -> Dict[str, object]:
     ensure_sharing_tables()
     rows = execute_query(
-        "SELECT active, activated_on FROM sharing_workflow_state WHERE id = 1;",
+        "SELECT active, activated_on, deactivated_on FROM sharing_workflow_state WHERE id = 1;",
         params=None,
         fetch=True,
     ) or []
     if rows:
         row = rows[0]
         activated_on = row["activated_on"].isoformat() if row["activated_on"] else None
-        workflow = {"active": bool(row["active"]), "activated_on": activated_on, "requests": {}}
+        deactivated_on = row["deactivated_on"].isoformat() if row.get("deactivated_on") else None
+        workflow = {
+            "active": bool(row["active"]),
+            "activated_on": activated_on,
+            "deactivated_on": deactivated_on,
+            "requests": {},
+        }
         sync_sharing_announcement(workflow["active"], workflow["activated_on"])
         return workflow
-    workflow = {"active": False, "activated_on": None, "requests": {}}
+    workflow = {"active": False, "activated_on": None, "deactivated_on": None, "requests": {}}
     sync_sharing_announcement(False, None)
     return workflow
 
@@ -276,14 +273,15 @@ def save_sharing_workflow_to_db(workflow: Dict[str, object]) -> None:
     activated_on = _coerce_optional_str(workflow.get("activated_on"))
     execute_query(
         """
-        INSERT INTO sharing_workflow_state (id, active, activated_on, updated_at)
-        VALUES (1, %s, %s, CURRENT_TIMESTAMP)
+        INSERT INTO sharing_workflow_state (id, active, activated_on, deactivated_on, updated_at)
+        VALUES (1, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT (id) DO UPDATE
         SET active = EXCLUDED.active,
             activated_on = EXCLUDED.activated_on,
+            deactivated_on = EXCLUDED.deactivated_on,
             updated_at = CURRENT_TIMESTAMP;
         """,
-        params=(active, activated_on),
+        params=(active, activated_on, _coerce_optional_str(workflow.get("deactivated_on"))),
         fetch=False,
     )
     sync_sharing_announcement(active, activated_on if isinstance(activated_on, str) else None)
@@ -318,11 +316,39 @@ def save_withdrawal_request_to_db(member_id: str, amount: float, cycle_on: str |
     return True
 
 
-def approve_withdrawal_request_to_db(member_id: str, approved_by: str, cycle_on: str | None) -> int | None:
+def approve_withdrawal_request_to_db(
+    member_id: str,
+    approved_by: str,
+    cycle_on: str | None,
+    cycle_end: str | None = None,
+    approver_id: str | None = None,
+) -> int | None:
     ensure_sharing_tables()
     if not cycle_on:
         return None
 
+    cycle_start_date = _coerce_sharing_date(cycle_on)
+    cycle_end_date = _coerce_sharing_date(cycle_end)
+    if cycle_start_date is None or cycle_end_date is None:
+        raise ValueError("The sharing cycle dates are unavailable.")
+    pending_rows = execute_query(
+        """
+        SELECT id, amount FROM sharing_withdrawal_requests
+        WHERE member_id = %s AND cycle_on = %s AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1;
+        """,
+        params=(member_id, cycle_on),
+        fetch=True,
+    ) or []
+    if not pending_rows:
+        return None
+    post_member_sharing_payout(
+        member_id=member_id,
+        cycle_start=cycle_start_date,
+        cycle_end=cycle_end_date,
+        approved_by=approver_id or approved_by,
+        requested_amount=float(pending_rows[0]["amount"]),
+    )
     rows = execute_query(
         """
         UPDATE sharing_withdrawal_requests
@@ -340,16 +366,6 @@ def approve_withdrawal_request_to_db(member_id: str, approved_by: str, cycle_on:
         return None
 
     request_id = int(rows[0]["id"])
-    approved_amount = float(rows[0]["amount"] or 0)
-    if approved_amount > 0:
-        execute_query(
-            """
-            INSERT INTO member_balance_adjustments (member_id, adjustment_type, amount, reference, reference_id, created_on)
-            VALUES (%s, %s, %s, %s, %s, %s);
-            """,
-            params=(member_id, "withdrawal", approved_amount, "sharing_withdrawal", request_id, _today_iso()),
-            fetch=False,
-        )
 
     invalidate_sharing_caches()
     return request_id
@@ -397,17 +413,12 @@ def fetch_approved_withdrawals() -> List[Dict[str, object]]:
 
 
 def get_member_take_home_amount(member_id: str) -> float:
-    total_savings = fetch_total_savings(member_id)
     engine = calculate_dividends()
-    total_interest = engine["total_interest"]
-    member_interest = fetch_member_interest(member_id)
-    member_rebate_pool = engine["member_rebate_pool"]
-    member_rebate_share = 0.0
-    if total_interest > 0:
-        member_rebate_share = (member_interest / total_interest) * member_rebate_pool
-    reserve = 100000.0
-    withdrawable_cash = max(total_savings - reserve, 0.0)
-    return withdrawable_cash + member_rebate_share
+    member_payout = next(
+        (row for row in engine["payouts"] if row["member_id"] == member_id),
+        None,
+    )
+    return float(member_payout["net_payout"]) if member_payout else 0.0
 
 
 def render_sharing_header() -> None:
@@ -530,24 +541,41 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
         if active:
             st.success("Sharing system is active.")
             activated_date = _coerce_sharing_date(activated_on)
-            if activated_date is not None:
-                deadline = activated_date + timedelta(days=15)
-                days_left = max((deadline - datetime.utcnow().date()).days, 0)
-                st.caption(f"Withdrawal window is open for {days_left} more day(s) from the activation date.")
+            st.caption(f"Interest and savings are accumulating for this cycle starting {activated_date}.")
         else:
-            st.info("Sharing system is not active yet. Activate it to open the workflow for members.")
+            closed_date = _coerce_sharing_date(workflow.get("deactivated_on"))
+            if closed_date:
+                st.info(f"Last sharing cycle closed on {closed_date}. Its withdrawal window follows closure.")
+            else:
+                st.info("Sharing system is not active yet. Activate it to open a new cycle.")
 
         if st.button("Deactivate Sharing System" if active else "Activate Sharing System", key="toggle_sharing_system"):
-            workflow["active"] = not active
-            if workflow["active"]:
-                workflow["activated_on"] = _today_iso()
+            if active:
+                cycle_start = _coerce_sharing_date(activated_on)
+                cycle_end = datetime.utcnow().date()
+                if cycle_start is None:
+                    st.error("Cannot close the cycle because its activation date is missing.")
+                    return
+                try:
+                    post_cycle_allocations(
+                        cycle_start,
+                        cycle_end,
+                        approved_by=str(user_id or user_role),
+                    )
+                except Exception as exc:
+                    st.error(f"Unable to close and allocate this sharing cycle: {exc}")
+                    return
+                workflow["active"] = False
+                workflow["deactivated_on"] = cycle_end.isoformat()
             else:
-                workflow["activated_on"] = None
+                workflow["active"] = True
+                workflow["activated_on"] = _today_iso()
+                workflow["deactivated_on"] = None
             save_sharing_workflow_to_db(workflow)
             st.session_state.sharing_workflow = workflow
             st.rerun()
 
-    if active and user_role in ("Treasurer", "Chairperson"):
+    if not active and workflow.get("deactivated_on") and user_role in ("Treasurer", "Chairperson"):
         pending_requests = [
             (member_id, request)
             for member_id, request in requests.items()
@@ -565,9 +593,23 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
                         request["approved_by"] = user_role
                         request["approved_on"] = _today_iso()
                         cycle_on = _coerce_optional_str(workflow.get("activated_on"))
-                        approve_withdrawal_request_to_db(member_id, user_role, cycle_on)
-                        st.session_state.sharing_workflow = workflow
-                        st.rerun()
+                        cycle_end = _coerce_optional_str(workflow.get("deactivated_on"))
+                        try:
+                            approved_id = approve_withdrawal_request_to_db(
+                                member_id,
+                                user_role,
+                                cycle_on,
+                                cycle_end,
+                                approver_id=str(user_id or user_role),
+                            )
+                            if approved_id is None:
+                                st.warning("This withdrawal request is no longer pending.")
+                            else:
+                                st.session_state.sharing_workflow = workflow
+                                st.rerun()
+                        except Exception as exc:
+                            request["status"] = "pending"
+                            st.error(f"Unable to approve and post the payout: {exc}")
 
         approved_withdrawals = fetch_approved_withdrawals()
         if approved_withdrawals:
@@ -589,27 +631,25 @@ def render_sharing_workflow_controls(user_role: str, user_id: str) -> None:
             st.info("No approved withdrawals yet.")
 
 
-def member_view(member_id: str):
-    total_savings = fetch_total_savings(member_id)
-    engine = calculate_dividends()
-    total_interest = engine["total_interest"]
-    admin_pool = engine["admin_pool"]
+def member_view(member_id: str, engine: Dict[str, Any] | None = None):
+    engine = engine or calculate_dividends()
 
-    member_interest = fetch_member_interest(member_id)
-    member_rebate_pool = engine["member_rebate_pool"]
-    member_rebate_share = 0.0
-    if total_interest > 0:
-        member_rebate_share = (member_interest / total_interest) * member_rebate_pool
+    payout = next(
+        (row for row in engine["payouts"] if row["member_id"] == member_id),
+        None,
+    ) or {}
+    member_rebate_share = float(payout.get("dividend_share") or 0.0)
+    take_home_amount = float(payout.get("net_payout") or 0.0)
+    withdrawable_cash = float(payout.get("withdrawable_savings") or 0.0)
 
     balance_breakdown = get_member_balance_breakdown(member_id)
-    reserve = 100000.0
-    withdrawable_cash = max(total_savings - reserve, 0.0)
-    reserve_shortfall = max(reserve - total_savings, 0.0)
-    take_home_amount = withdrawable_cash + member_rebate_share
+    total_savings = float(balance_breakdown.get("total_balance") or 0.0)
+    reserve_shortfall = max(100000.0 - total_savings, 0.0)
 
     workflow = get_sharing_workflow()
     active = bool(workflow.get("active", False))
     activated_on = _coerce_optional_str(workflow.get("activated_on"))
+    deactivated_on = _coerce_optional_str(workflow.get("deactivated_on"))
     requests = workflow.get("requests", {})
     if not isinstance(requests, dict):
         requests = {}
@@ -619,12 +659,11 @@ def member_view(member_id: str):
         request_details = requests.get(member_id, {})
         if isinstance(request_details, dict):
             request_status = request_details.get("status")
+    closed_date = _coerce_sharing_date(deactivated_on)
     window_open = False
-    if active:
-        activated_date = _coerce_sharing_date(activated_on)
-        if activated_date is not None:
-            deadline = activated_date + timedelta(days=15)
-            window_open = (datetime.utcnow().date() <= deadline)
+    if not active and closed_date is not None:
+        deadline = closed_date + timedelta(days=15)
+        window_open = datetime.utcnow().date() <= deadline
 
     if reserve_shortfall > 0:
         st.markdown(
@@ -648,7 +687,7 @@ def member_view(member_id: str):
         f"""
         <div class='sh-summary-grid'>
           <div class='sh-summary-card primary'>
-            <div class='sh-summary-card-label'>Rebate Share</div>
+            <div class='sh-summary-card-label'>Cycle Sharing Allocation</div>
             <div class='sh-summary-card-value'>UGX {member_rebate_share:,.0f}</div>
             <div class='sh-summary-card-note'>Your share from loan interest.</div>
           </div>
@@ -662,7 +701,7 @@ def member_view(member_id: str):
         unsafe_allow_html=True,
     )
 
-    if active:
+    if window_open:
         if request_status == "approved":
             st.success("Withdrawal accepted. Your take-home balance has been processed.")
         elif request_status == "pending":
@@ -683,81 +722,31 @@ def member_view(member_id: str):
                     st.rerun()
                 else:
                     st.warning("A withdrawal request already exists for this member in this cycle.")
-        elif not window_open:
-            st.warning("The 15-day withdrawal window has closed for this cycle.")
         else:
             st.info("No take-home amount is available for withdrawal right now.")
+    elif active:
+        st.info("Sharing is still active. Member payouts become requestable after leadership closes and allocates the cycle.")
+    elif deactivated_on:
+        st.warning("The 15-day withdrawal window has closed for this cycle.")
     else:
         st.info("Sharing is not active yet. The Chairperson must activate it first.")
 
 
-@st.cache_data(show_spinner=False, ttl=300)
-def fetch_members_overview(limit: int = 50) -> List[Dict]:
-    rows = execute_query(
-        "SELECT member_id, full_name FROM members ORDER BY full_name LIMIT %s;",
-        params=(limit,),
-        fetch=True,
-    )
-    members: List[Dict] = []
-    if not rows:
-        return members
-
-    engine = calculate_dividends()
-    total_interest = engine["total_interest"]
-    member_rebate_pool = engine["member_rebate_pool"]
-    global_per_member = engine["global_per_member"]
-
-    member_ids = [r["member_id"] for r in rows]
-    if not member_ids:
-        return members
-
-    # Batch fetch total_paid per member
-    paid_rows = execute_query(
-        "SELECT member_id, COALESCE(SUM(amount_paid),0) AS total_paid FROM subscriptions WHERE member_id = ANY(%s) GROUP BY member_id;",
-        params=(member_ids,),
-        fetch=True,
-    ) or []
-    paid_map = {r["member_id"]: float(r["total_paid"] or 0) for r in paid_rows}
-
-    # Batch fetch total_withdrawn per member
-    withdrawn_rows = execute_query(
-        "SELECT member_id, COALESCE(SUM(amount),0) AS total_withdrawn FROM member_balance_adjustments WHERE adjustment_type = 'withdrawal' AND member_id = ANY(%s) GROUP BY member_id;",
-        params=(member_ids,),
-        fetch=True,
-    ) or []
-    withdrawn_map = {r["member_id"]: float(r["total_withdrawn"] or 0) for r in withdrawn_rows}
-
-    # Batch fetch member interest
-    interest_rows = execute_query(
-        "SELECT member_id, COALESCE(SUM(interest_accumulated),0) AS member_interest FROM loans WHERE member_id = ANY(%s) GROUP BY member_id;",
-        params=(member_ids,),
-        fetch=True,
-    ) or []
-    interest_map = {r["member_id"]: float(r["member_interest"] or 0) for r in interest_rows}
-
-    for r in rows:
-        mid = r["member_id"]
-        name = r["full_name"]
-        total_paid = paid_map.get(mid, 0.0)
-        total_withdrawn = withdrawn_map.get(mid, 0.0)
-        total_savings = max(total_paid - total_withdrawn, 0.0)
-        member_interest = interest_map.get(mid, 0.0)
-        rebate_share = 0.0
-        if total_interest > 0:
-            rebate_share = (member_interest / total_interest) * member_rebate_pool
-        dividend_share = rebate_share + global_per_member
-        withdrawable = max(total_savings - 100000.0, 0.0)
-        net_payout = withdrawable + dividend_share
-        members.append(
-            {
-                "member_id": mid,
-                "full_name": name,
-                "total_savings": total_savings,
-                "dividend_share": dividend_share,
-                "net_payout": net_payout,
-            }
-        )
-    return members
+def fetch_members_overview(engine: Dict[str, Any] | None = None) -> List[Dict]:
+    engine = engine or calculate_dividends()
+    return [
+        {
+            "member_id": row["member_id"],
+            "full_name": row["full_name"],
+            "total_savings": row["savings_balance"],
+            "dividend_share": row["dividend_share"],
+            "net_payout": row["net_payout"],
+            "borrower_rebate": row["borrower_rebate"],
+            "equal_share": row["equal_share"],
+            "weighted_share": row["weighted_share"],
+        }
+        for row in engine["payouts"]
+    ]
 
 
 def generate_pdf_report(members: List[Dict]) -> bytes:
@@ -809,18 +798,19 @@ def sharing_view():
 
     render_sharing_header()
     render_sharing_workflow_controls(user_role, user_id)
+    engine = calculate_dividends()
     # Member interface
-    member_view(user_id)
+    member_view(user_id, engine)
 
     # Executive controls
     if user_role in ("Treasurer", "Chairperson"):
         with st.spinner("Loading data..."):
-            members = fetch_members_overview(limit=50)
+            members = fetch_members_overview(engine)
             total_members = len(members)
             total_savings = sum(m["total_savings"] for m in members)
             total_dividend = sum(m["dividend_share"] for m in members)
             total_net = sum(m["net_payout"] for m in members)
-            admin_pool = calculate_dividends()["admin_pool"]
+            admin_pool = engine["admin_pool"]
 
         st.markdown(
             f"""

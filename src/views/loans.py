@@ -9,6 +9,12 @@ import streamlit as st
 import pandas as pd
 
 from src.database.connection import execute_query
+from src.utils.balances import (
+    get_member_loan_accounts,
+    get_loan_records,
+    record_loan_interest_accrual,
+    record_opening_loan,
+)
 from src.utils.audit import record_audit_event
 from src.utils.membership import normalize_membership_status
 from src.utils.notifications import create_notification
@@ -108,7 +114,7 @@ def get_loan_interest_schedule(
 
 
 def ensure_loan_interest_tracking_columns() -> None:
-    """Add loan date-tracking columns needed for grace-period interest logic."""
+    """Ensure loan interest and payment tracking columns exist."""
     try:
         execute_query(
             "ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_interest_applied_at DATE;",
@@ -120,6 +126,11 @@ def ensure_loan_interest_tracking_columns() -> None:
             params=None,
             fetch=False,
         )
+        execute_query(
+            "ALTER TABLE loans ADD COLUMN IF NOT EXISTS total_interest_collected NUMERIC NOT NULL DEFAULT 0;",
+            params=None,
+            fetch=False,
+        )
     except Exception as exc:
         st.warning(f"Unable to ensure loan interest tracking columns: {exc}")
 
@@ -127,10 +138,9 @@ def ensure_loan_interest_tracking_columns() -> None:
 def approve_loan(loan_id: int, approver_role: str, approver_name: Optional[str] = None) -> bool:
     """Approve a submitted loan and trigger its first interest charge immediately."""
     try:
-        execute_query(
-            "UPDATE loans SET status = 'Approved', approved_by = %s, approved_date = %s WHERE loan_id = %s;",
-            params=(f"{approver_name.strip()} ({approver_role})" if approver_name and approver_name.strip() else approver_role, datetime.now(timezone.utc), loan_id),
-            fetch=False,
+        record_opening_loan(
+            loan_id,
+            approver_id=str(st.session_state.get("user_id") or approver_name or approver_role),
         )
         record_audit_event(
             entity_type="loan",
@@ -208,12 +218,7 @@ def format_loan_date(value: object | None) -> str:
 def fetch_latest_member_loan(member_id: Optional[str]) -> Optional[dict]:
     if not member_id:
         return None
-    rows = execute_query(
-        "SELECT loan_id, amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, status, approved_by, approved_date, applied_date, last_interest_applied_at, last_payment_applied_at "
-        "FROM loans WHERE member_id = %s ORDER BY applied_date DESC, loan_id DESC LIMIT 1;",
-        params=(member_id,),
-        fetch=True,
-    )
+    rows = get_loan_records(member_id=member_id)
     return rows[0] if rows else None
 
 
@@ -763,7 +768,7 @@ def inject_loans_theme() -> None:
     )
 
 
-def update_interest_accumulation(reference_date: Optional[datetime | date] = None) -> None:
+def update_interest_accumulation(reference_date: Optional[datetime | date] = None) -> bool:
     """Apply interest to active/approved loans.
 
     Interest is charged immediately when a loan is first issued. The first repayment due date is
@@ -776,19 +781,18 @@ def update_interest_accumulation(reference_date: Optional[datetime | date] = Non
     ref = parse_db_datetime(reference_date) or datetime.utcnow()
     ref_date = ref.date()
     rows = execute_query(
-        "SELECT loan_id, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, approved_date, applied_date, last_interest_applied_at, last_payment_applied_at "
-        "FROM loans WHERE status IN ('Approved', 'Active');",
+        "SELECT loan_id, member_id, approved_by, approved_date, applied_date, last_interest_applied_at, last_payment_applied_at "
+        "FROM loans WHERE UPPER(BTRIM(status::text)) IN ('APPROVED', 'ACTIVE');",
         params=None,
         fetch=True,
     )
     if not rows:
-        return
+        return True
 
+    successful = True
     for loan in rows:
         try:
             loan_id = loan["loan_id"]
-            outstanding = float(loan["outstanding_balance"] or 0)
-            interest_acc = float(loan["interest_accumulated"] or 0)
             start_date = _coerce_loan_date(loan.get("approved_date") or loan.get("applied_date"))
             if start_date is None:
                 continue
@@ -799,17 +803,22 @@ def update_interest_accumulation(reference_date: Optional[datetime | date] = Non
             if not should_apply_interest_for_loan(start_date, ref, last_interest_date, last_payment_date):
                 continue
 
-            principal = max(0.0, outstanding)
-            new_interest = principal * 0.10
-            new_outstanding = principal + new_interest
-
+            record_loan_interest_accrual(
+                loan_id=int(loan_id),
+                member_id=str(loan["member_id"]),
+                accrual_date=ref_date,
+                approved_by=str(loan.get("approved_by") or "loan-terms"),
+                rate=0.10,
+            )
             execute_query(
-                "UPDATE loans SET interest_accumulated = %s, outstanding_balance = %s, last_interest_applied_at = %s WHERE loan_id = %s;",
-                params=(interest_acc + new_interest, new_outstanding, ref_date, loan_id),
+                "UPDATE loans SET last_interest_applied_at = %s WHERE loan_id = %s;",
+                params=(ref_date, loan_id),
                 fetch=False,
             )
         except Exception as e:
+            successful = False
             st.error(f"Failed to update interest for loan {loan.get('loan_id')}: {e}")
+    return successful
 
 
 def create_historical_loan_record(
@@ -820,9 +829,13 @@ def create_historical_loan_record(
     outstanding_balance: Optional[float] = None,
     accumulated_interest: Optional[float] = None,
     notes: Optional[str] = None,
+    accountant_reconciliation_reference: Optional[str] = None,
 ) -> bool:
-    """Insert a historical loan record and use either supplied accumulated interest or backfill logic for sharing."""
+    """Create an audited legacy loan and journal only reconciled opening receivables."""
     if not member_id:
+        return False
+    if not accountant_reconciliation_reference or not accountant_reconciliation_reference.strip():
+        st.error("An accountant reconciliation reference is required before posting legacy loan balances.")
         return False
 
     if loan_date is None:
@@ -842,8 +855,8 @@ def create_historical_loan_record(
     purpose_supported = ensure_loans_purpose_column()
     try:
         if purpose_supported:
-            execute_query(
-                "INSERT INTO loans (member_id, amount_requested, outstanding_balance, purpose, status, applied_date, approved_date, interest_accumulated) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);",
+            inserted = execute_query(
+                "INSERT INTO loans (member_id, amount_requested, outstanding_balance, purpose, status, applied_date, approved_date, interest_accumulated) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING loan_id;",
                 params=(
                     member_id,
                     principal_amount,
@@ -854,11 +867,11 @@ def create_historical_loan_record(
                     loan_date_value,
                     effective_interest,
                 ),
-                fetch=False,
+                fetch=True,
             )
         else:
-            execute_query(
-                "INSERT INTO loans (member_id, amount_requested, outstanding_balance, status, applied_date, approved_date, interest_accumulated) VALUES (%s, %s, %s, %s, %s, %s, %s);",
+            inserted = execute_query(
+                "INSERT INTO loans (member_id, amount_requested, outstanding_balance, status, applied_date, approved_date, interest_accumulated) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING loan_id;",
                 params=(
                     member_id,
                     principal_amount,
@@ -868,10 +881,40 @@ def create_historical_loan_record(
                     loan_date_value,
                     effective_interest,
                 ),
-                fetch=False,
+                fetch=True,
             )
-        if accumulated_interest is None:
-            update_interest_accumulation()
+        if status in {"Active", "Approved"}:
+            loan_id = int(inserted[0]["loan_id"])
+            principal_due = max(0.0, effective_outstanding - effective_interest)
+            approver_id = str(st.session_state.get("user_id") or "Chairperson")
+            reconciliation_notes = (
+                f"Reconciliation reference: {accountant_reconciliation_reference.strip()}. "
+                f"{notes or ''}"
+            ).strip()
+            if principal_due > 0:
+                from src.utils.balances import record_opening_balance
+
+                record_opening_balance(
+                    member_id=member_id,
+                    amount=principal_due,
+                    account_code="LOAN_PRINCIPAL_RECEIVABLE",
+                    reference=f"opening-loan:{loan_id}:principal",
+                    approved_by=approver_id,
+                    loan_id=loan_id,
+                    notes=reconciliation_notes,
+                )
+            if effective_interest > 0:
+                from src.utils.balances import record_opening_balance
+
+                record_opening_balance(
+                    member_id=member_id,
+                    amount=effective_interest,
+                    account_code="LOAN_INTEREST_RECEIVABLE",
+                    reference=f"opening-loan:{loan_id}:interest",
+                    approved_by=approver_id,
+                    loan_id=loan_id,
+                    notes=reconciliation_notes,
+                )
         return True
     except Exception as exc:
         st.error(f"Failed to save historical loan: {exc}")
@@ -1030,8 +1073,20 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
 
         latest_loan = fetch_latest_member_loan(user_id)
         if latest_loan:
-            outstanding_balance = format_money(latest_loan.get('outstanding_balance'))
-            interest_accumulated = format_money(latest_loan.get('interest_accumulated'))
+            ledger_backed = latest_loan.get("ledger_backed", True)
+            balance_expected = str(latest_loan.get("status") or "").strip().lower() in {
+                "active", "approved", "closed", "cleared"
+            }
+            outstanding_balance = (
+                format_money(latest_loan.get("outstanding_balance"))
+                if ledger_backed
+                else "Needs ledger reconciliation" if balance_expected else "Not disbursed"
+            )
+            interest_accumulated = (
+                format_money(latest_loan.get("interest_accumulated"))
+                if ledger_backed
+                else "Needs ledger reconciliation" if balance_expected else "Not disbursed"
+            )
             requested_amount_display = format_money(latest_loan.get('amount_requested'))
             applied_date = format_loan_date(latest_loan.get('applied_date'))
             approved_date = format_loan_date(latest_loan.get('approved_date'))
@@ -1064,15 +1119,13 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
             )
 
     with col2:
-        interest_amount = requested_amount * 0.10
-        total_payback = requested_amount + interest_amount
         st.markdown(
             f"""
             <div class='repayment-preview-card'>
               <h3>Repayment Preview</h3>
               <div class='note-row'>
-                <p class='est-label'>10% estimated repayment model</p>
-                <p class='micro-caption'>Prices are indicative and reviewed at approval.</p>
+                <p class='est-label'>Declining-balance terms</p>
+                <p class='micro-caption'>Final terms are confirmed at approval.</p>
               </div>
               <div class='metric-grid'>
                 <div class='metric-block'>
@@ -1080,26 +1133,21 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
                   <p class='metric-block__value'>UGX {requested_amount:,.0f}</p>
                 </div>
                 <div class='metric-block'>
-                  <p class='metric-block__label'>Estimated Interest</p>
-                  <p class='metric-block__value'>UGX {interest_amount:,.0f}</p>
+                  <p class='metric-block__label'>Interest</p>
+                  <p class='metric-block__value'>Calculated per cycle</p>
                 </div>
                 <div class='metric-block'>
-                  <p class='metric-block__label'>Total Payback</p>
-                  <p class='metric-block__value'>UGX {total_payback:,.0f}</p>
+                  <p class='metric-block__label'>Repayment</p>
+                  <p class='metric-block__value'>Interest first</p>
                 </div>
               </div>
-              <p class='footnote'>This preview uses a simple 10% interest model for planning purposes only. Final terms are confirmed at loan approval.</p>
+              <p class='footnote'>Interest is calculated on the outstanding principal. Approved repayments are applied to interest first, then principal.</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    loan_rows = execute_query(
-        "SELECT loan_id, amount_requested, outstanding_balance, COALESCE(interest_accumulated,0) AS interest_accumulated, status, approved_by, approved_date, applied_date "
-        "FROM loans WHERE member_id = %s ORDER BY applied_date DESC, loan_id DESC;",
-        params=(user_id,),
-        fetch=True,
-    ) or []
+    loan_rows = get_loan_records(member_id=user_id)
 
     if loan_rows:
         history_data = [
@@ -1107,8 +1155,22 @@ def render_personal_credit_desk(user_id: Optional[str], user_status: Optional[st
                 "Loan ID": row.get("loan_id"),
                 "Status": normalize_loan_status(row.get("status")),
                 "Requested": format_money(row.get("amount_requested")),
-                "Outstanding": format_money(row.get("outstanding_balance")),
-                "Interest": format_money(row.get("interest_accumulated")),
+                "Outstanding": (
+                    format_money(row.get("outstanding_balance"))
+                    if row.get("ledger_backed")
+                    else "Needs reconciliation"
+                    if str(row.get("status") or "").strip().lower()
+                    in {"active", "approved", "closed", "cleared"}
+                    else "Not disbursed"
+                ),
+                "Interest": (
+                    format_money(row.get("interest_accumulated"))
+                    if row.get("ledger_backed")
+                    else "Needs reconciliation"
+                    if str(row.get("status") or "").strip().lower()
+                    in {"active", "approved", "closed", "cleared"}
+                    else "Not disbursed"
+                ),
                 "Applied Date": format_loan_date(row.get("applied_date")),
                 "Approved Date": format_loan_date(row.get("approved_date")),
                 "Approved By": row.get("approved_by") or "-",
@@ -1204,9 +1266,9 @@ def render_executive_credit_control(user_role: str) -> None:
                 principal_amount = st.number_input("Principal Amount", min_value=0.0, step=100.0, format="%.2f", key="historical_principal")
                 loan_date = st.date_input("Loan Date", key="historical_loan_date")
                 status = st.selectbox("Loan Status", ["Cleared", "Approved", "Active", "Closed"], key="historical_status")
-                accumulated_interest = st.number_input("Accumulated Interest Already Collected", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="historical_interest")
-                st.caption("This amount will be included in the member's sharing rebate calculation.")
+                accumulated_interest = st.number_input("Reconciled unpaid interest balance", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="historical_interest")
                 outstanding_balance = st.number_input("Outstanding Balance (optional)", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="historical_outstanding")
+                reconciliation_reference = st.text_input("Accountant reconciliation reference", key="historical_reconciliation_reference")
                 notes = st.text_area("Notes", placeholder="e.g. Old loan taken before launch and repaid later", key="historical_notes")
                 submitted = st.form_submit_button("Save Historical Loan")
                 if submitted:
@@ -1221,34 +1283,18 @@ def render_executive_credit_control(user_role: str) -> None:
                             outstanding_balance=float(outstanding_balance) if outstanding_balance else None,
                             accumulated_interest=float(accumulated_interest) if accumulated_interest else None,
                             notes=notes.strip() or None,
+                            accountant_reconciliation_reference=reconciliation_reference,
                         )
                         if saved:
-                            st.success("Historical loan saved and included in sharing calculations.")
+                            st.success("Reconciled opening loan balances have been recorded in the accounting ledger.")
                             st.rerun()
 
     status_tabs = st.tabs(["Review Queue", "Approved Loans", "Rejected Requests"])
 
-    purpose_supported = ensure_loans_purpose_column()
-    purpose_column = ", l.purpose" if purpose_supported else ""
-    submitted_rows = execute_query(
-        f"SELECT l.loan_id, l.member_id, COALESCE(m.full_name, '') AS applicant_name{purpose_column}, l.amount_requested, l.outstanding_balance, COALESCE(l.interest_accumulated, 0) AS interest_accumulated, l.status, l.applied_date, l.approved_date, l.approved_by "
-        "FROM loans l LEFT JOIN members m ON m.member_id = l.member_id "
-        "WHERE l.status = 'Submitted' ORDER BY l.applied_date ASC;",
-        params=None,
-        fetch=True,
-    ) or []
-    approved_rows = execute_query(
-        "SELECT loan_id, member_id, amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, status, applied_date, approved_date, approved_by "
-        "FROM loans WHERE status = 'Approved' ORDER BY approved_date DESC;",
-        params=None,
-        fetch=True,
-    ) or []
-    rejected_rows = execute_query(
-        "SELECT loan_id, member_id, amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated, status, applied_date, approved_date, approved_by "
-        "FROM loans WHERE status = 'Rejected' ORDER BY approved_date DESC;",
-        params=None,
-        fetch=True,
-    ) or []
+    ensure_loans_purpose_column()
+    submitted_rows = get_loan_records(status="Submitted")
+    approved_rows = get_loan_records(status="Approved")
+    rejected_rows = get_loan_records(status="Rejected")
 
     with status_tabs[0]:
         st.markdown("<div class='list-card'><div class='list-card__title'>Executive review queue</div></div>", unsafe_allow_html=True)

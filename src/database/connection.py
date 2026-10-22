@@ -2,6 +2,7 @@ import contextlib
 import logging
 import os
 import socket
+from functools import lru_cache
 from typing import Any, Generator, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -162,13 +163,13 @@ def _resolve_db_dsn() -> str:
     )
 
 
-@st.cache_resource
+@lru_cache(maxsize=None)
 def init_db_pool(
     minconn: int = 1,
     maxconn: int = 5,
 ):
     """
-    Create and reuse a PostgreSQL connection pool for the Streamlit app.
+    Create and reuse the process-wide PostgreSQL connection pool.
     Retries up to 3 times on transient errors before raising.
     """
 
@@ -265,8 +266,7 @@ def clear_cached_connection() -> None:
     """Clear the cached connection pool so a fresh pool can be created."""
 
     try:
-        if hasattr(init_db_pool, "clear"):
-            init_db_pool.clear()
+        init_db_pool.cache_clear()
     except Exception:
         logger.exception("Unable to clear cached database connection pool.")
 

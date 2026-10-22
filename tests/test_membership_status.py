@@ -35,15 +35,25 @@ class MembershipStatusTests(unittest.TestCase):
     def test_sanitize_member_status_records_updates_inactive_members(self, mock_execute):
         mock_execute.side_effect = [
             [{"member_id": "MEM-001", "join_date": date(2023, 1, 1)}],
-            [{"total_paid": 150000.0, "pending_paid": 40000.0}],
             None,
         ]
 
-        updated_count = sanitize_member_status_records()
+        with patch("src.utils.balances.get_effective_member_balance", return_value=150000.0), patch(
+            "src.utils.balances.get_member_subscription_arrears", return_value=0.0
+        ):
+            updated_count = sanitize_member_status_records()
 
         self.assertEqual(updated_count, 1)
-        self.assertEqual(mock_execute.call_args_list[2][0][0], "UPDATE members SET status = %s WHERE member_id = %s;")
-        self.assertEqual(mock_execute.call_args_list[2][1]["params"], ("Full Member", "MEM-001"))
+        update_call = next(
+            (
+                call
+                for call in mock_execute.call_args_list
+                if call.args and call.args[0] == "UPDATE members SET status = %s WHERE member_id = %s;"
+            ),
+            None,
+        )
+        self.assertIsNotNone(update_call)
+        self.assertEqual(update_call.kwargs["params"], ("Full Member", "MEM-001"))
 
 
 if __name__ == "__main__":

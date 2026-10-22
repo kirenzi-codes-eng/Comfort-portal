@@ -11,13 +11,24 @@ from html import escape
 from typing import Optional
 
 from src.components.auth import get_avatar
-from src.database.connection import execute_query
+from src.database.connection import DatabaseUnavailableError, execute_query
 from src.utils.membership import get_membership_status_for_db, sanitize_member_status_records
+from src.utils.schema_compat import column_exists
 from src.utils.balances import (
+    get_admin_dashboard_balances,
     get_effective_member_balance,
     get_effective_pool_balance,
     get_effective_pool_welfare_balance,
+    get_loan_portfolio,
     get_member_balance_breakdown,
+    get_member_activity_summary,
+    get_member_loan_accounts,
+    get_member_loan_outstanding_total,
+    get_member_subscription_arrears,
+    get_subscription_arrears,
+    get_subscription_history,
+    get_subscription_totals,
+    get_loan_records,
     get_member_welfare_reserve_balance,
 )
 from src.utils.timezone import now_in_uganda
@@ -69,12 +80,22 @@ def safe_execute_query(query: str, params=None, fetch: bool = False, fallback=No
     try:
         rows = execute_query(query, params=params, fetch=fetch)
         return fallback if rows is None else rows
+    except DatabaseUnavailableError as exc:
+        logger.warning("Database unavailable during query; using fallback data: %s", exc)
+        return fallback
     except psycopg2.Error as exc:
         if _is_table_missing_error(exc):
             logger.warning("Missing table detected in query, using fallback data: %s", query)
             return fallback
         logger.exception("Unexpected database error during query: %s", query)
         return fallback
+
+
+def _members_key_expression(alias: str) -> str:
+    """Return the member join key used by the active database schema."""
+    if column_exists("members", "member_id"):
+        return f"{alias}.member_id::text"
+    return f"{alias}.id::text"
 
 
 @st.cache_data(ttl=300)
@@ -158,36 +179,9 @@ def get_next_loan_due_date(user_id: Optional[str]) -> Optional[date]:
 def get_member_actual_loan_balance(user_id: Optional[str]) -> Optional[float]:
     if not user_id:
         return None
-
-    rows = safe_execute_query(
-        "SELECT outstanding_balance FROM loans WHERE member_id = %s AND status IN ('Active','Approved') ORDER BY COALESCE(approved_date, applied_date) DESC LIMIT 1;",
-        params=(user_id,),
-        fetch=True,
-        fallback=[],
-    ) or []
-
-    if not rows:
+    total = get_member_loan_outstanding_total(user_id)
+    if total <= 0:
         return None
-
-    try:
-        return float(rows[0].get("outstanding_balance") or 0)
-    except (TypeError, ValueError):
-        return None
-
-
-def calculate_effective_loan_balance(rows: list[dict]) -> float:
-    total = 0.0
-    for row in rows:
-        outstanding = float(row.get("outstanding_balance") or 0.0)
-        interest = float(row.get("interest_accumulated") or 0.0)
-        amount_requested = float(row.get("amount_requested") or 0.0)
-
-        # If outstanding balance is still recorded as original principal and interest is tracked separately,
-        # include the separate interest amount. Otherwise, use the outstanding balance directly.
-        if interest > 0 and outstanding == amount_requested:
-            total += outstanding + interest
-        else:
-            total += outstanding
     return total
 
 
@@ -195,39 +189,27 @@ def get_member_activity_timeline(user_id: Optional[str], limit: int = 6) -> list
     if not user_id:
         return []
 
-    subscription_rows = safe_execute_query(
-        "SELECT s.id, s.billing_month, s.amount_paid, s.status, m.full_name AS payer_name "
-        "FROM subscriptions s LEFT JOIN members m ON m.member_id = s.member_id "
-        "WHERE s.member_id = %s ORDER BY s.billing_month DESC LIMIT 12;",
-        params=(user_id,),
-        fetch=True,
-        fallback=[],
-    ) or []
-
-    loan_rows = safe_execute_query(
-        "SELECT l.id, l.loan_id, l.applied_date, l.approved_date, l.amount_requested, l.outstanding_balance, l.status, l.approved_by, "
-        "m.full_name AS applicant_name FROM loans l LEFT JOIN members m ON m.member_id = l.member_id "
-        "WHERE l.member_id = %s ORDER BY COALESCE(l.approved_date, l.applied_date) DESC LIMIT 12;",
-        params=(user_id,),
-        fetch=True,
-        fallback=[],
-    ) or []
+    subscription_rows = get_subscription_history(member_id=user_id)
+    loan_rows = get_loan_records(member_id=user_id)
 
     events: list[dict] = []
     for row in subscription_rows:
-        timestamp = parse_db_datetime(row.get("billing_month"))
+        timestamp = parse_db_datetime(row.get("approved_at") or row.get("billing_month"))
         if timestamp is None:
             continue
         amount = float(row.get("amount_paid") or 0.0)
-        status = str(row.get("status") or "Pending").strip().title()
-        payer_name = str(row.get("payer_name") or "Member account")
-        follow_up = "Confirm payment was received." if status.lower() in {"pending", "submitted"} else "No action required."
+        payer_name = str(row.get("full_name") or "Member account")
+        transaction_title = (
+            "Subscription payment reversed"
+            if row.get("category") == "REVERSAL"
+            else "Subscription payment • Approved"
+        )
         events.append(
             {
                 "kind": "subscription",
-                "title": f"Subscription payment • {status}",
-                "description": f"Paid by: {payer_name} | Amount: {format_currency(amount)} | Billing month: {timestamp.strftime('%B %Y')} | Reference: {row.get('id') or 'Not available'}",
-                "follow_up": follow_up,
+                "title": transaction_title,
+                "description": f"Paid by: {payer_name} | Amount: {format_currency(amount)} | Billing month: {timestamp.strftime('%B %Y')} | Reference: {row.get('reference') or 'Not available'}",
+                "follow_up": "No action required.",
                 "timestamp": timestamp,
             }
         )
@@ -237,9 +219,9 @@ def get_member_activity_timeline(user_id: Optional[str], limit: int = 6) -> list
         if timestamp is None:
             continue
         amount = float(row.get("amount_requested") or 0.0)
-        outstanding_balance = float(row.get("outstanding_balance") or 0.0)
+        outstanding_balance = float(row.get("outstanding_balance") or 0.0) if row.get("ledger_backed") else 0.0
         status = str(row.get("status") or "Submitted").strip().title()
-        reference = row.get("loan_id") or row.get("id") or "Not available"
+        reference = row.get("loan_id") or "Not available"
         applicant_name = str(row.get("applicant_name") or "Member account")
         approver_name = str(row.get("approved_by") or "Awaiting approval")
         if status.lower() in {"submitted", "pending", "applied"}:
@@ -283,79 +265,36 @@ def get_member_profile_details(user_id: Optional[str]) -> dict:
 
 
 def get_admin_dashboard_metrics() -> dict:
-    pool_savings = get_effective_pool_balance()
-    total_welfare = get_effective_pool_welfare_balance()
-
-    loan_rows = safe_execute_query(
-        "SELECT amount_requested, outstanding_balance, COALESCE(interest_accumulated, 0) AS interest_accumulated "
-        "FROM loans WHERE status IN ('Active','Approved');",
-        params=None,
-        fetch=True,
-        fallback=[],
-    ) or []
-    total_cash_loaned = sum(
-        float(row.get("amount_requested") or row.get("outstanding_balance") or 0.0)
-        for row in loan_rows
-    )
-    total_unpaid_interest = sum(
-        float(row.get("interest_accumulated") or 0.0)
-        for row in loan_rows
-    )
-    total_unrepaid_principal = sum(
-        max(
-            0.0,
-            float(row.get("outstanding_balance") or 0.0)
-            - float(row.get("interest_accumulated") or 0.0),
-        )
-        for row in loan_rows
-    )
-    total_unrepaid = sum(
-        float(row.get("outstanding_balance") or 0.0)
-        for row in loan_rows
-    )
-
+    balances = get_admin_dashboard_balances()
+    loan_portfolio = get_loan_portfolio()
     today = today_in_uganda()
-    current_year = today.year
-    current_month = today.month
-    arrears_rows = safe_execute_query(
-        """
-        SELECT COALESCE(SUM(GREATEST(0, %s - COALESCE(total_paid_year, 0))), 0) AS total_arrears
-        FROM members m
-        LEFT JOIN (
-            SELECT member_id, SUM(COALESCE(amount_paid, 0)) AS total_paid_year
-            FROM subscriptions
-            WHERE EXTRACT(YEAR FROM billing_month) = %s
-            GROUP BY member_id
-        ) paid_year ON paid_year.member_id = m.member_id;
-        """,
-        params=(current_month * 20000, current_year),
-        fetch=True,
-        fallback=[{"total_arrears": 0}],
-    ) or [{"total_arrears": 0}]
-    total_arrears = float(arrears_rows[0].get("total_arrears") or 0.0)
-
-    borrower_rows = safe_execute_query(
-        """
-        SELECT m.full_name AS member_name, l.status AS loan_status, COALESCE(l.outstanding_balance, 0) AS loan_balance
-        FROM loans l
-        JOIN members m ON m.member_id = l.member_id
-        WHERE l.status IN ('Active','Approved') AND COALESCE(l.outstanding_balance, 0) > 0
-        ORDER BY l.outstanding_balance DESC;
-        """,
-        params=None,
-        fetch=True,
-        fallback=[{"member_name": x["Member"], "loan_status": "Active", "loan_balance": x["Loan Balance"]} for x in MOCK_ACTIVE_BORROWERS],
-    ) or []
+    arrears = get_subscription_arrears(today)
+    borrower_rows = [
+        {
+            "member_name": loan["member_name"],
+            "loan_status": (
+                "Needs ledger reconciliation"
+                if not loan["ledger_backed"]
+                else loan["status"]
+            ),
+            "loan_balance": loan["outstanding"],
+            "ledger_backed": loan["ledger_backed"],
+        }
+        for loan in loan_portfolio["loans"]
+    ]
 
     return {
-        "total_pool_savings": pool_savings,
-        "total_welfare": total_welfare,
-        "total_cash_loaned": total_cash_loaned,
-        "total_unpaid_interest": total_unpaid_interest,
-        "total_unrepaid_interest": total_unpaid_interest,
-        "total_unrepaid_principal": total_unrepaid_principal,
-        "total_repaid": total_unrepaid,
-        "total_arrears": total_arrears,
+        "total_pool_savings": balances["savings_pool"],
+        "total_welfare": balances["welfare_pool"],
+        "total_cash_loaned": balances["total_disbursed"],
+        "total_interest_collected": balances["interest_collected"],
+        "total_unpaid_interest": balances["outstanding_interest"],
+        "total_unrepaid_interest": balances["outstanding_interest"],
+        "total_unrepaid_principal": loan_portfolio["outstanding_principal"],
+        "total_outstanding_loan_balance": loan_portfolio["outstanding_total"],
+        "total_repaid": loan_portfolio["outstanding_total"],
+        "loans_requiring_reconciliation": loan_portfolio.get("loans_requiring_reconciliation", 0),
+        "total_arrears": arrears["total_arrears"],
         "borrowers": borrower_rows,
     }
 
@@ -363,58 +302,15 @@ def get_admin_dashboard_metrics() -> dict:
 @st.cache_data(ttl=60)
 def get_financial_metrics_cached(user_id: str) -> dict:
     """Cached version of get_financial_metrics with 1-minute TTL."""
-    try:
-        contribution_rows = safe_execute_query(
-            "SELECT COALESCE(SUM(amount_paid),0) AS total_contributed FROM subscriptions WHERE member_id = %s;",
-            params=(user_id,),
-            fetch=True,
-            fallback=[{"total_contributed": 0}],
-        ) or []
-        contribution_row = contribution_rows[0] if contribution_rows else {}
-        total_paid = float((contribution_row or {}).get("total_contributed", 0) or 0)
-
-        # Active Loan Balance including accumulated interest
-        loan_sql = (
-            "SELECT outstanding_balance, interest_accumulated, amount_requested "
-            "FROM loans WHERE member_id = %s AND status IN ('Active','Approved');"
-        )
-        loan_rows = safe_execute_query(
-            loan_sql,
-            params=(user_id,),
-            fetch=True,
-            fallback=[{"outstanding_balance": MOCK_FINANCIAL_METRICS["loan_balance"], "interest_accumulated": 0.0, "amount_requested": MOCK_FINANCIAL_METRICS["loan_balance"]}],
-        )
-        loan_balance = calculate_effective_loan_balance(loan_rows or [])
-        if loan_balance == 0.0:
-            loan_balance = get_effective_member_balance(user_id)
-
-        # Pending Subscription Arrears - compute year-to-date due amount
-        today = today_in_uganda()
-        current_year = today.year
-        current_month = today.month
-        paid_year_sql = (
-            "SELECT COALESCE(SUM(amount_paid),0) AS total_paid_year FROM subscriptions "
-            "WHERE member_id = %s AND EXTRACT(YEAR FROM billing_month) = %s;"
-        )
-        paid_year_rows = safe_execute_query(
-            paid_year_sql,
-            params=(user_id, current_year),
-            fetch=True,
-            fallback=[{"total_paid_year": 0}],
-        ) or []
-        paid_year_row = paid_year_rows[0] if paid_year_rows else {}
-        total_paid_year = float(paid_year_row.get("total_paid_year", 0) or 0)
-        expected_year_to_date = current_month * 20000
-        arrears = max(0.0, expected_year_to_date - float(total_paid_year))
-
-        return {
-            "total_paid": total_paid,
-            "loan_balance": loan_balance,
-            "arrears": arrears,
-        }
-    except psycopg2.Error:
-        logger.warning("Falling back to mock financial metrics due to database error")
-        return MOCK_FINANCIAL_METRICS.copy()
+    total_paid = get_subscription_totals(user_id)["total_paid"]
+    loan_balance = get_member_loan_outstanding_total(user_id)
+    today = today_in_uganda()
+    arrears = get_member_subscription_arrears(user_id, today)
+    return {
+        "total_paid": total_paid,
+        "loan_balance": loan_balance,
+        "arrears": arrears,
+    }
 
 
 
@@ -442,64 +338,7 @@ def format_currency(value) -> str:
 
 
 def get_member_summary_stats() -> dict:
-    today = today_in_uganda()
-    current_year = today.year
-    current_month = today.month
-    rows = safe_execute_query(
-        """
-        SELECT COUNT(*) AS total_members,
-               SUM(CASE
-                     WHEN lower(trim(coalesce(m.status, 'pending'))) IN
-                          ('active', 'probationary', 'probational', 'partial', 'partial member', 'full', 'full member')
-                       AND greatest(0, (%s - coalesce(paid.total_paid_year, 0))) < 40000
-                     THEN 1 ELSE 0
-                   END) AS active_members,
-               SUM(CASE
-                     WHEN lower(trim(coalesce(m.status, 'pending'))) IN
-                          ('inactive', 'suspended', 'terminated')
-                       OR (lower(trim(coalesce(m.status, 'pending'))) IN
-                          ('active', 'probationary', 'probational', 'partial', 'partial member', 'full', 'full member')
-                           AND greatest(0, (%s - coalesce(paid.total_paid_year, 0))) >= 40000)
-                     THEN 1 ELSE 0
-                   END) AS inactive_members,
-               SUM(CASE
-                     WHEN lower(trim(coalesce(m.status, 'pending'))) IN
-                          ('pending', 'due', 'open', 'incomplete', 'rejected')
-                     THEN 1 ELSE 0
-                   END) AS pending_members
-        FROM members m
-        LEFT JOIN (
-            SELECT member_id, SUM(coalesce(amount_paid, 0)) AS total_paid_year
-            FROM subscriptions
-            WHERE extract(year FROM billing_month) = %s
-            GROUP BY member_id
-        ) paid ON paid.member_id = m.member_id;
-        """,
-        params=(current_month * 20000, current_month * 20000, current_year),
-        fetch=True,
-        fallback=[
-            {
-                "total_members": 0,
-                "active_members": 0,
-                "inactive_members": 0,
-                "pending_members": 0,
-            }
-        ],
-    ) or [
-        {
-            "total_members": 0,
-            "active_members": 0,
-            "inactive_members": 0,
-            "pending_members": 0,
-        }
-    ]
-
-    stats = rows[0] if rows else {
-        "total_members": 0,
-        "active_members": 0,
-        "inactive_members": 0,
-        "pending_members": 0,
-    }
+    stats = get_member_activity_summary(today_in_uganda())
     total_members = int(stats.get("total_members") or 0)
     active_members = int(stats.get("active_members") or 0)
     inactive_members = int(stats.get("inactive_members") or 0)
@@ -516,6 +355,8 @@ def get_member_summary_stats() -> dict:
         "total_members": total_members,
         "active_members": active_members,
         "inactive_members": inactive_members,
+        "active_member_names": stats.get("active_member_names") or [],
+        "inactive_member_names": stats.get("inactive_member_names") or [],
         "required_action": required_action,
     }
 
@@ -1062,19 +903,35 @@ def home_view():
         balance_breakdown = get_member_balance_breakdown(user_id) if user_id else {"welfare_balance": 0.0, "savings_balance": 0.0}
         actual_loan_balance = get_member_actual_loan_balance(user_id) if user_id else None
         loan_balance = float(actual_loan_balance if actual_loan_balance is not None else 0)
+        member_loan_accounts = get_member_loan_accounts(user_id) if user_id else []
+        has_unreconciled_active_loan = any(
+            not loan.get("ledger_backed")
+            and str(loan.get("status") or "").strip().lower() in {"active", "approved"}
+            for loan in member_loan_accounts
+        )
 
         try:
-            next_due_date = get_next_loan_due_date(user_id) if actual_loan_balance is not None else None
+            next_due_date = (
+                get_next_loan_due_date(user_id)
+                if actual_loan_balance is not None or has_unreconciled_active_loan
+                else None
+            )
         except Exception:
             logger.exception("Unable to load next loan due date")
             next_due_date = None
         if next_due_date:
             next_due_display = next_due_date.strftime("%d %b %Y")
+        elif has_unreconciled_active_loan:
+            next_due_display = "Ledger reconciliation required"
         elif loan_balance > 0:
             next_due_display = "Active loan pending due date"
         else:
             next_due_display = "No active loan"
-        projected_share = subscriptions_contributed * 0.08 if subscriptions_contributed > 0 else 0.0
+        loan_balance_display = (
+            "Needs reconciliation"
+            if has_unreconciled_active_loan and actual_loan_balance is None
+            else format_currency(loan_balance)
+        )
         alert_class = "action-card--alert" if arrears_balance > 0 else ""
         summary_stats = get_member_summary_stats()
         summary_html = ""
@@ -1088,10 +945,22 @@ def home_view():
                 "<div class='summary-card'>"
                 "<div class='summary-card-title'>Active members</div>"
                 f"<div class='summary-card-value'>{summary_stats.get('active_members', 0)}</div>"
+                "<details class='summary-members-dropdown'>"
+                "<summary>View members</summary>"
+                "<ul>"
+                + "".join(f"<li>{escape(str(name))}</li>" for name in summary_stats.get("active_member_names", []))
+                + ("" if summary_stats.get("active_member_names") else "<li>No active members</li>")
+                + "</ul></details>"
                 "</div>"
                 "<div class='summary-card'>"
                 "<div class='summary-card-title'>Inactive members</div>"
                 f"<div class='summary-card-value'>{summary_stats.get('inactive_members', 0)}</div>"
+                "<details class='summary-members-dropdown'>"
+                "<summary>View members</summary>"
+                "<ul>"
+                + "".join(f"<li>{escape(str(name))}</li>" for name in summary_stats.get("inactive_member_names", []))
+                + ("" if summary_stats.get("inactive_member_names") else "<li>No inactive members</li>")
+                + "</ul></details>"
                 "</div>"
                 "<div class='summary-card'>"
                 "<div class='summary-card-title'>Required action</div>"
@@ -1237,6 +1106,24 @@ def home_view():
                 font-weight: 700;
                 color: #0f172a;
             }}
+            .summary-members-dropdown {{
+                margin-top: 8px;
+                color: #334155;
+                font-size: 0.82rem;
+            }}
+            .summary-members-dropdown summary {{
+                cursor: pointer;
+                font-weight: 600;
+            }}
+            .summary-members-dropdown ul {{
+                max-height: 180px;
+                overflow-y: auto;
+                margin: 6px 0 0;
+                padding-left: 20px;
+            }}
+            .summary-members-dropdown li {{
+                padding: 2px 0;
+            }}
             .summary-card-action {{
                 margin-top: 10px;
                 font-size: 0.9rem;
@@ -1259,7 +1146,7 @@ def home_view():
                 <div class="action-icon">🏦</div>
                 <div class="action-title">Loans &amp; Credit</div>
                 <div class="action-stats">
-                  <div class="action-stat"><span class="action-stat-label">Outstanding Balance</span><span class="action-stat-value">{format_currency(loan_balance)}</span></div>
+                  <div class="action-stat"><span class="action-stat-label">Outstanding Balance</span><span class="action-stat-value">{loan_balance_display}</span></div>
                   <div class="action-stat"><span class="action-stat-label">Next Due Date</span><span class="action-stat-value">{next_due_display}</span></div>
                 </div>
               </div>
@@ -1305,14 +1192,20 @@ def home_view():
             total_pool_savings = float(admin_metrics.get("total_pool_savings") or 0)
             total_welfare = float(admin_metrics.get("total_welfare") or 0)
             total_cash_loaned = float(admin_metrics.get("total_cash_loaned") or 0)
+            total_interest_collected = float(admin_metrics.get("total_interest_collected") or 0)
             total_unrepaid_principal = float(admin_metrics.get("total_unrepaid_principal") or 0)
             total_unrepaid_interest = float(
                 admin_metrics.get("total_unrepaid_interest")
                 or admin_metrics.get("total_unpaid_interest")
                 or 0
             )
-            total_repaid = float(admin_metrics.get("total_repaid") or 0)
+            total_outstanding_loan_balance = float(
+                admin_metrics.get("total_outstanding_loan_balance")
+                or admin_metrics.get("total_repaid")
+                or 0
+            )
             total_arrears = float(admin_metrics.get("total_arrears") or 0)
+            loans_requiring_reconciliation = int(admin_metrics.get("loans_requiring_reconciliation") or 0)
             admin_borrowers_rows = admin_metrics.get("borrowers") or []
 
             st.markdown(
@@ -1320,11 +1213,13 @@ def home_view():
                 <div style="display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;">
                   <div class="kpi-card"><div class="kpi-label">Total Savings Pool</div><div class="kpi-value">{format_currency(total_pool_savings)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Welfare</div><div class="kpi-value">{format_currency(total_welfare)}</div></div>
-                  <div class="kpi-card"><div class="kpi-label">Total Cash Loaned (Principal)</div><div class="kpi-value">{format_currency(total_cash_loaned)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Principal Disbursed (Net of Reversals)</div><div class="kpi-value">{format_currency(total_cash_loaned)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Interest Collected So Far</div><div class="kpi-value">{format_currency(total_interest_collected)}</div><div class="kpi-label">Recorded from repayments since tracking was enabled</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Unrepaid Principal</div><div class="kpi-value">{format_currency(total_unrepaid_principal)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Unrepaid Interest</div><div class="kpi-value">{format_currency(total_unrepaid_interest)}</div></div>
-                  <div class="kpi-card"><div class="kpi-label">Total Unrepaid Loan Amount</div><div class="kpi-value">{format_currency(total_repaid)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Total Outstanding Loan Balance</div><div class="kpi-value">{format_currency(total_outstanding_loan_balance)}</div></div>
                   <div class="kpi-card"><div class="kpi-label">Total Outstanding Arrears</div><div class="kpi-value">{format_currency(total_arrears)}</div></div>
+                  <div class="kpi-card"><div class="kpi-label">Loans Requiring Ledger Reconciliation</div><div class="kpi-value">{loans_requiring_reconciliation}</div></div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1332,18 +1227,21 @@ def home_view():
 
             borrower_table = []
             for row in admin_borrowers_rows:
-                # Support both DB row shape and fallback/mock shape
                 member_name = row.get("member_name") or row.get("Member") or "Unknown"
-                loan_balance_val = float(row.get("loan_balance") or row.get("Loan Balance") or 0)
+                loan_balance = row.get("loan_balance", row.get("Loan Balance"))
+                loan_balance_val = (
+                    f"UGX {float(loan_balance):,.0f}"
+                    if loan_balance is not None
+                    else "Balance unavailable — reconcile ledger"
+                )
                 borrower_table.append({
                     "Member": member_name,
                     "Loan Balance": loan_balance_val,
                     "Loan Status": row.get("loan_status") or row.get("Loan Status") or "Unknown",
                 })
-
             if borrower_table:
                 borrower_df = pd.DataFrame(borrower_table)
-                borrower_df["Loan Balance"] = borrower_df["Loan Balance"].map(lambda value: f"UGX {value:,.0f}")
+                borrower_df = pd.DataFrame(borrower_table)
                 st.dataframe(
                     borrower_df,
                     width="stretch",
@@ -1351,7 +1249,7 @@ def home_view():
                     column_config={column: {"width": "small"} for column in borrower_df.columns},
                 )
             else:
-                st.info("No active borrowers found.")
+                st.info("No approved or active loan accounts found.")
         else:
             pass
 

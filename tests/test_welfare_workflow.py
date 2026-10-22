@@ -141,15 +141,21 @@ def test_optimized_welfare_announcement_is_concise_and_paid_details_helper_match
                 "payment_reference": "REF-002",
                 "payment_date": datetime(2026, 2, 10),
             }]
-        if "FROM ledger_transactions" in query:
-            return [{
-                "member_id": "M-003",
-                "member_name": "John Doe",
-                "contribution_amount": 20000,
-            }]
         return []
 
     monkeypatch.setattr("src.views.welfare_support_optimized.execute_query", fake_execute_query)
+    monkeypatch.setattr(
+        "src.views.welfare_support_optimized.get_welfare_payment_amount",
+        lambda request_id: 20000.0,
+    )
+    monkeypatch.setattr(
+        "src.views.welfare_support_optimized.get_welfare_contribution_breakdown",
+        lambda request_id: [{
+            "member_id": "M-003",
+            "member_name": "John Doe",
+            "contribution_amount": 20000,
+        }],
+    )
 
     message = _build_announcement_content({"support_category": "ILLNESS - Member", "member_name": "Asha"}, "Paid", "Treasurer")
 
@@ -158,6 +164,7 @@ def test_optimized_welfare_announcement_is_concise_and_paid_details_helper_match
     assert "Asha" in message
     assert "paid" in message.lower()
 
+    get_optimized_member_paid_welfare_details.clear()
     details = get_optimized_member_paid_welfare_details("M-001")
     assert details["amount_paid"] == 20000.0
     assert details["payment_reference"] == "REF-002"
