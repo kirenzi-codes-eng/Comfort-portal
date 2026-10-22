@@ -7,3 +7,9 @@ venv/
 .env
 *.log
 .DS_Store
+
+.streamlit/secrets.toml
+
+__pycache__/
+
+*.pyc
