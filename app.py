@@ -185,12 +185,6 @@ MODULE_CONFIG = {
             "icon": "📈",
         },
         {
-            "title": "Group Chat",
-            "path": SRC / "components" / "chat.py",
-            "candidates": ["chat_view"],
-            "icon": "💬",
-        },
-        {
             "title": "Inquiry",
             "path": SRC / "views" / "inquiry.py",
             "candidates": ["inquiry_view"],
@@ -201,7 +195,7 @@ MODULE_CONFIG = {
             "path": SRC / "views" / "subscriptions.py",
             "candidates": ["chairperson_monitor_view"],
             "icon": "📊",
-            "roles": ["Chairperson"],
+            "roles": ["Chairperson", "Secretary", "Treasurer"],
         },
         {
             "title": "Admin Docs",

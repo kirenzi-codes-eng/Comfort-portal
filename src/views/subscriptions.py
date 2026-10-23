@@ -3,6 +3,7 @@ import re
 import io
 import base64
 import uuid
+import logging
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
@@ -42,6 +43,8 @@ PROOF_STATUS_VERIFIED = "Verified"
 PROOF_STATUS_REJECTED = "Rejected"
 PROOF_STATUS_CLARIFICATION = "Clarification Requested"
 MAX_SUBSCRIPTION_AMOUNT = MAX_MONTHLY_SUBSCRIPTION
+SUBSCRIPTION_MONITOR_ROLES = frozenset({"Chairperson", "Secretary", "Treasurer"})
+logger = logging.getLogger(__name__)
 
 
 def get_subscription_proof_access_role(user_role: str | None) -> str:
@@ -1414,15 +1417,15 @@ def chairperson_monitor_view():
     st.markdown(
         """
         <div class='hero-block'>
-          <div class='hero-title'>Chairperson Monitor</div>
+          <div class='hero-title'>Subscription Monitor</div>
           <div class='hero-copy'>View yearly subscription progress and recent payment activity for transparent oversight.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     user_role = st.session_state.get("user_role")
-    if user_role != "Chairperson":
-        st.info("Only Chairperson can access the subscription monitor.")
+    if user_role not in SUBSCRIPTION_MONITOR_ROLES:
+        st.info("The subscription monitor is restricted to the Chairperson, Secretary, and Treasurer.")
         return
 
     today = today_in_uganda()
@@ -1465,8 +1468,19 @@ def chairperson_monitor_view():
     selected = st.selectbox("Select member to inspect", options=list(member_options.keys()))
     selected_member_id = member_options[selected]
 
+    from src.views.home import get_member_activity_timeline, render_member_activity_timeline
+
+    st.markdown("### Member Activity Timeline")
+    try:
+        activity_events = get_member_activity_timeline(selected_member_id, limit=6)
+    except Exception:
+        logger.exception("Unable to load member activity timeline for the subscription monitor")
+        st.error("Unable to load this member's activity timeline.")
+    else:
+        render_member_activity_timeline(activity_events)
+
     st.markdown(f"### Detailed member subscription ledger for {escape(selected)}")
-    member_view(selected_member_id, show_proof_section=False, user_role="Chairperson")
+    member_view(selected_member_id, show_proof_section=False, user_role=user_role)
 
 
 def subscriptions_view():

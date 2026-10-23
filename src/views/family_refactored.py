@@ -354,6 +354,26 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
                         st.error("Type UNLOCK exactly to continue.")
             return
 
+        new_children_count = 0
+        if user_role == "Chairperson":
+            st.markdown(
+                """
+                <div class="form-card">
+                    <div class="form-card-title">➕ Add missing family entries</div>
+                    <p style="margin: 0 0 0.6rem; color: #475569;">The Chairperson can add relationships that were left out of the original submission, including up to 8 children.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            new_children_count = st.number_input(
+                "Additional children to add (up to 8)",
+                min_value=0,
+                max_value=8,
+                value=0,
+                step=1,
+                key="family_new_children_count",
+            )
+
         with st.form("family_edit_form"):
             update_rows: list[tuple[str, str, str, int]] = []
             for record in records:
@@ -380,15 +400,6 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
 
             new_entries: list[tuple[str, str, str, str]] = []
             if user_role == "Chairperson":
-                st.markdown(
-                    """
-                    <div class="form-card">
-                        <div class="form-card-title">➕ Add missing family entries</div>
-                        <p style="margin: 0 0 0.6rem; color: #475569;">The Chairperson can add relationships that were left out of the original submission, including 1 to 8 children.</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
                 new_relationship = st.selectbox(
                     "New relationship",
                     ["None", "Spouse", "Father", "Mother", "Father-in-law", "Mother-in-law", "Next of Kin"],
@@ -400,17 +411,9 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
                     if new_name and new_name.strip():
                         new_entries.append((new_relationship, new_name.strip(), (new_contact or "").strip() or "N/A", "Alive"))
 
-                new_children_count = st.number_input(
-                    "Additional children to add (1 to 8)",
-                    min_value=0,
-                    max_value=8,
-                    value=0,
-                    step=1,
-                    key="family_new_children_count",
-                )
                 for index in range(int(new_children_count)):
-                    child_name = st.text_input(f"Additional child {index + 1} full name", key=f"family_new_child_name_{index}")
-                    child_contact = st.text_input(f"Additional child {index + 1} contact", key=f"family_new_child_contact_{index}")
+                    child_name = st.text_input(f"Child {index + 1} full name", key=f"family_new_child_name_{index}")
+                    child_contact = st.text_input(f"Child {index + 1} contact", key=f"family_new_child_contact_{index}")
                     if child_name and child_name.strip():
                         new_entries.append(("Child", child_name.strip(), (child_contact or "").strip() or "N/A", "Alive"))
 
@@ -427,6 +430,25 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
                     st.success("Registry updated and locked again.")
                     st.rerun()
         return
+
+    st.markdown(
+        """
+        <div class="form-card">
+            <div class="form-card-title">👶 Children</div>
+            <p style="margin: 0 0 0.6rem; color: #475569;">You can add up to 8 children. Choose the number below and the matching entry fields will appear.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    children_count = st.number_input(
+        "How many children would you like to add? (up to 8)",
+        min_value=0,
+        max_value=8,
+        value=0,
+        step=1,
+        help="Optional — choose between 1 and 8 if adding children.",
+        key="family_children_count",
+    )
 
     with st.form("family_create_form"):
         default_entries = [
@@ -456,25 +478,6 @@ def _render_edit_view(records: list[dict], member_identifier: str, user_role: st
             if name_value and name_value.strip():
                 entry_rows.append((relation, name_value.strip(), (contact_value or "").strip() or "N/A", "Alive"))
 
-        st.markdown(
-            """
-            <div class="form-card">
-                <div class="form-card-title">👶 Children</div>
-                <p style="margin: 0 0 0.6rem; color: #475569;">You can add up to 8 children. Choose the number below and the matching entry fields will appear.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        children_count = st.number_input(
-            "How many children would you like to add? (1 to 8)",
-            min_value=0,
-            max_value=8,
-            value=0,
-            step=1,
-            help="Optional — if adding children, choose between 1 and 8.",
-        )
-        if children_count > 0:
-            st.caption(f"Child entry fields ready: {int(children_count)}")
         for index in range(int(children_count)):
             st.markdown(
                 f"""

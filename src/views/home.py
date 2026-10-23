@@ -9,12 +9,17 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 from typing import Optional
+from urllib.parse import quote
 
 from src.components.auth import get_avatar
 from src.database.connection import DatabaseUnavailableError, execute_query
-from src.utils.membership import get_membership_status_for_db, sanitize_member_status_records
+from src.utils.membership import (
+    get_membership_status_for_db,
+    sanitize_member_status_records,
+)
 from src.utils.schema_compat import column_exists
 from src.utils.balances import (
+    INACTIVE_ARREARS_THRESHOLD,
     get_admin_dashboard_balances,
     get_effective_member_balance,
     get_effective_pool_balance,
@@ -34,6 +39,10 @@ from src.utils.balances import (
 from src.utils.timezone import now_in_uganda
 
 logger = logging.getLogger(__name__)
+
+GLOBAL_FINANCIAL_UPDATE_ROLES = frozenset(
+    {"Chairperson", "Vice Chairperson", "Secretary", "Treasurer", "Welfare"}
+)
 
 MOCK_FINANCIAL_METRICS = {
     "total_paid": 820000.0,
@@ -102,7 +111,7 @@ def _members_key_expression(alias: str) -> str:
 def get_announcements_cached():
     """Cached announcements with 5-minute TTL."""
     rows = safe_execute_query(ANNOUNCEMENTS_QUERY, params=None, fetch=True, fallback=MOCK_ANNOUNCEMENTS)
-    return rows or []
+    return [row for row in (rows or []) if isinstance(row, dict)]
 
 
 ANNOUNCEMENTS_QUERY = "SELECT title, content, posted_by, created_at FROM announcements ORDER BY created_at DESC;"
@@ -264,6 +273,7 @@ def get_member_profile_details(user_id: Optional[str]) -> dict:
     return rows[0] if rows else {}
 
 
+@st.cache_data(ttl=60)
 def get_admin_dashboard_metrics() -> dict:
     balances = get_admin_dashboard_balances()
     loan_portfolio = get_loan_portfolio()
@@ -299,6 +309,40 @@ def get_admin_dashboard_metrics() -> dict:
     }
 
 
+def render_loan_updates_table(user_role: str, admin_metrics: dict) -> None:
+    if user_role not in GLOBAL_FINANCIAL_UPDATE_ROLES:
+        return
+
+    borrower_table = []
+    for row in admin_metrics.get("borrowers") or []:
+        member_name = row.get("member_name") or row.get("Member") or "Unknown"
+        loan_balance = row.get("loan_balance", row.get("Loan Balance"))
+        loan_balance_value = (
+            f"UGX {float(loan_balance):,.0f}"
+            if loan_balance is not None
+            else "Balance unavailable — reconcile ledger"
+        )
+        borrower_table.append(
+            {
+                "Member": member_name,
+                "Loan Balance": loan_balance_value,
+                "Loan Status": row.get("loan_status") or row.get("Loan Status") or "Unknown",
+            }
+        )
+
+    st.markdown("### Loan Updates")
+    if borrower_table:
+        borrower_df = pd.DataFrame(borrower_table)
+        st.dataframe(
+            borrower_df,
+            width="stretch",
+            hide_index=True,
+            column_config={column: {"width": "small"} for column in borrower_df.columns},
+        )
+    else:
+        st.info("No approved or active loan accounts found.")
+
+
 @st.cache_data(ttl=60)
 def get_financial_metrics_cached(user_id: str) -> dict:
     """Cached version of get_financial_metrics with 1-minute TTL."""
@@ -327,7 +371,7 @@ def calculate_member_status(join_date, saving_balance, arrears_balance):
     membership_label, membership_color = label_map.get(db_status, ("Pending", "#F59E0B"))
 
     arrears_balance = float(arrears_balance or 0)
-    activity_label = "Inactive" if arrears_balance >= 40000 else "Active"
+    activity_label = "Inactive" if arrears_balance >= INACTIVE_ARREARS_THRESHOLD else "Active"
     activity_color = "#DC2626" if activity_label == "Inactive" else "#059669"
 
     return membership_label, membership_color, activity_label, activity_color
@@ -337,6 +381,7 @@ def format_currency(value) -> str:
     return f"UGX {float(value or 0):,.0f}"
 
 
+@st.cache_data(ttl=60)
 def get_member_summary_stats() -> dict:
     stats = get_member_activity_summary(today_in_uganda())
     total_members = int(stats.get("total_members") or 0)
@@ -396,7 +441,7 @@ def get_featured_announcement(announcements):
 
 
 def render_announcements_carousel(announcements):
-    """Render an auto-rotating carousel that slides every 4 seconds."""
+    """Render the current announcement without triggering background page reloads."""
     if not announcements:
         st.info("No announcements at this time.")
         return
@@ -414,22 +459,47 @@ def render_announcements_carousel(announcements):
     author_text = escape(str(ann.get("posted_by") or "System"))
     meta_text = escape(str(ann.get("created_at") or ""))
 
-    # Prefer a static map image from the project's assets/ dir if available, otherwise fall back to the inline SVG
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    map_filename = "world-map.png"
-    map_asset_rel = f"assets/{map_filename}"
-    map_asset_path = os.path.join(project_root, "assets", map_filename)
-    if os.path.exists(map_asset_path):
-        background_css = (
-            f"background-image: url('{map_asset_rel}'); background-size: cover; background-position: center; "
-            "background-repeat: no-repeat; background-color: rgba(6,78,59,0.85); background-blend-mode: overlay;"
-        )
-    else:
-        background_css = (
-            "background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1200 600%22 preserveAspectRatio=%22xMidYMid slice%22><rect width=%221200%22 height=%22600%22 fill=%22%23064E3B%22/><g fill=%22none%22 stroke=%22%23ffffff%22 stroke-opacity=%220.06%22 stroke-width=%221%22><circle cx=%22600%22 cy=%22300%22 r=%22240%22/><path d=%22M360 300c40-80 120-80 240-80s200 0 240 80%22/><path d=%22M360 300c40 80 120 80 240 80s200 0 240-80%22/><path d=%22M600 60v480%22/><path d=%22M480 60v480%22/><path d=%22M720 60v480%22/></g></svg>'); "
-            "background-size: cover; background-position: center; background-repeat: no-repeat; "
-            "background-color: rgba(6,78,59,0.85); background-blend-mode: overlay;"
-        )
+    map_svg = """
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500">
+      <defs>
+        <clipPath id="globe-clip">
+          <circle cx="870" cy="250" r="225"/>
+        </clipPath>
+        <radialGradient id="globe-shade" cx="35%" cy="30%" r="75%">
+          <stop offset="0" stop-color="#0f766e"/>
+          <stop offset="1" stop-color="#022c22"/>
+        </radialGradient>
+      </defs>
+      <circle cx="870" cy="250" r="225" fill="url(#globe-shade)"
+              stroke="#ffffff" stroke-opacity=".72" stroke-width="4"/>
+      <g clip-path="url(#globe-clip)" fill="none" stroke="#ffffff"
+         stroke-opacity=".58" stroke-width="2.5">
+        <ellipse cx="870" cy="250" rx="78" ry="225"/>
+        <ellipse cx="870" cy="250" rx="158" ry="225"/>
+        <path d="M645 250h450"/>
+        <ellipse cx="870" cy="250" rx="225" ry="70"/>
+        <ellipse cx="870" cy="250" rx="225" ry="145"/>
+        <path d="M870 25v450"/>
+      </g>
+      <g clip-path="url(#globe-clip)" fill="#ffffff" fill-opacity=".24"
+         stroke="#ffffff" stroke-opacity=".42" stroke-width="2"
+         stroke-linejoin="round">
+        <path d="M678 129l25-23 35 5 17 20 29 2 18 23-8 22-27 8-8 28-22 17-8 31-20 9-14-25-5-31-20-20-4-31-18-15z"/>
+        <path d="M746 267l27-11 22 18 7 34-14 30-12 45-19 22-14-25-3-40-16-27 7-32z"/>
+        <path d="M827 101l18-12 23 6 7 14-13 12-22-4z"/>
+        <path d="M854 136l29-17 39 6 20-12 43 13 22 24-11 20-31 4-14 22-27-2-11 25-25 8-19-18-24-4-17-23-22-3-10-18z"/>
+        <path d="M913 238l29-12 32 14 18 31-13 34-22 21-12 38-18 13-13-28-4-36-17-25 5-34z"/>
+        <path d="M1001 313l23-10 27 8 15 20-10 18-31 4-21-14z"/>
+      </g>
+    </svg>
+    """
+    map_data_uri = f"data:image/svg+xml,{quote(map_svg)}"
+    background_css = (
+        "background-image: linear-gradient(90deg, #064e3b 0%, rgba(6,78,59,.96) 42%, "
+        f"rgba(6,78,59,.2) 100%), url('{map_data_uri}'); "
+        "background-size: 100% 100%, auto 120%; "
+        "background-position: center, right center; background-repeat: no-repeat;"
+    )
 
     # Carousel container - clean HTML with slide animation
     announcement_html = f"""
@@ -451,23 +521,6 @@ def render_announcements_carousel(announcements):
     """
     
     st.markdown(announcement_html, unsafe_allow_html=True)
-
-    # Auto-rotate every 4 seconds by refreshing the page in the background.
-    import streamlit.components.v1 as components
-    components.html(
-        """
-        <script>
-        setTimeout(() => {
-            window.location.reload();
-        }, 4000);
-        </script>
-        """,
-        height=0,
-    )
-
-    # Prepare the next slide index for the next page refresh.
-    st.session_state.carousel_index = (current_index + 1) % total_announcements
-
 
 def render_member_activity_timeline(events: list[dict]) -> None:
     if not events:
@@ -592,11 +645,13 @@ def render_admin_announcement_manager() -> None:
         action = st.radio("Choose action", ["Post new announcement", "Update existing announcement"], horizontal=True)
 
         if action == "Post new announcement":
-            title = st.text_input("Title", key="admin_announcement_title")
-            content = st.text_area("Content", key="admin_announcement_content")
-            posted_by = st.text_input("Posted by", key="admin_announcement_author")
+            with st.form("announcement_form"):
+                title = st.text_input("Title", key="admin_announcement_title")
+                content = st.text_area("Content", key="admin_announcement_content")
+                posted_by = st.text_input("Posted by", key="admin_announcement_author")
+                submitted = st.form_submit_button("Post announcement")
 
-            if st.button("Post announcement"):
+            if submitted:
                 if not title.strip() or not content.strip():
                     st.warning("Title and content are required.")
                 else:
@@ -606,6 +661,7 @@ def render_admin_announcement_manager() -> None:
                             params=(title.strip(), content.strip(), posted_by.strip() or "Admin", now_in_uganda()),
                             fetch=False,
                         )
+                        get_announcements_cached.clear()  # type: ignore[attr-defined]
                         st.success("Announcement posted successfully.")
                     except psycopg2.Error as exc:
                         st.error(f"Failed to post announcement: {exc}")
@@ -619,11 +675,13 @@ def render_admin_announcement_manager() -> None:
             selected_label = st.selectbox("Select announcement", options=list(options.keys()))
             selected_row = options[selected_label]
 
-            title = st.text_input("Title", value=str(selected_row.get("title") or ""), key="admin_update_title")
-            content = st.text_area("Content", value=str(selected_row.get("content") or ""), key="admin_update_content")
-            posted_by = st.text_input("Posted by", value=str(selected_row.get("posted_by") or ""), key="admin_update_author")
+            with st.form("announcement_form"):
+                title = st.text_input("Title", value=str(selected_row.get("title") or ""), key="admin_update_title")
+                content = st.text_area("Content", value=str(selected_row.get("content") or ""), key="admin_update_content")
+                posted_by = st.text_input("Posted by", value=str(selected_row.get("posted_by") or ""), key="admin_update_author")
+                submitted = st.form_submit_button("Update announcement")
 
-            if st.button("Update announcement"):
+            if submitted:
                 if not title.strip() or not content.strip():
                     st.warning("Title and content are required.")
                 else:
@@ -637,6 +695,7 @@ def render_admin_announcement_manager() -> None:
                                 params=(title.strip(), content.strip(), posted_by.strip() or "Admin", now_in_uganda(), announcement_id),
                                 fetch=False,
                             )
+                            get_announcements_cached.clear()  # type: ignore[attr-defined]
                             st.success("Announcement updated successfully.")
                     except psycopg2.Error as exc:
                         st.error(f"Failed to update announcement: {exc}")
@@ -842,13 +901,8 @@ def home_view():
     saving_balance = metrics.get("total_paid", 0)
     arrears_balance = metrics.get("arrears", 0)
 
-    allowed_roles = [
-        "Chairperson",
-        "Vice Chairperson",
-        "Secretary",
-        "Treasurer",
-        "Welfare",
-    ]
+    allowed_roles = GLOBAL_FINANCIAL_UPDATE_ROLES
+    admin_metrics = get_admin_dashboard_metrics() if user_role in allowed_roles else {}
     column_weights = [7, 3] if user_role in allowed_roles else [9, 1]
     left_col, right_col = st.columns(column_weights, gap="large")
 
@@ -1165,30 +1219,15 @@ def home_view():
             unsafe_allow_html=True,
         )
 
-        try:
-            member_activity_timeline = get_member_activity_timeline(user_id, limit=6) if user_id else []
-        except Exception:
-            logger.exception("Unable to load member activity timeline")
-            member_activity_timeline = []
-
-        if user_role in allowed_roles:
-            render_member_activity_timeline(member_activity_timeline)
+        render_loan_updates_table(user_role, admin_metrics)
 
     with right_col:
-        allowed_roles = [
-            "Chairperson",
-            "Vice Chairperson",
-            "Secretary",
-            "Treasurer",
-            "Welfare",
-        ]
         if user_role in allowed_roles:
             st.markdown(
                 "<div style='font-size: 1.05rem; font-weight: 700; color: #064E3B; margin-bottom: 10px;'>Global Financial Updates</div>",
                 unsafe_allow_html=True,
             )
 
-            admin_metrics = get_admin_dashboard_metrics()
             total_pool_savings = float(admin_metrics.get("total_pool_savings") or 0)
             total_welfare = float(admin_metrics.get("total_welfare") or 0)
             total_cash_loaned = float(admin_metrics.get("total_cash_loaned") or 0)
@@ -1206,8 +1245,6 @@ def home_view():
             )
             total_arrears = float(admin_metrics.get("total_arrears") or 0)
             loans_requiring_reconciliation = int(admin_metrics.get("loans_requiring_reconciliation") or 0)
-            admin_borrowers_rows = admin_metrics.get("borrowers") or []
-
             st.markdown(
                 f"""
                 <div style="display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;">
@@ -1225,33 +1262,6 @@ def home_view():
                 unsafe_allow_html=True,
             )
 
-            borrower_table = []
-            for row in admin_borrowers_rows:
-                member_name = row.get("member_name") or row.get("Member") or "Unknown"
-                loan_balance = row.get("loan_balance", row.get("Loan Balance"))
-                loan_balance_val = (
-                    f"UGX {float(loan_balance):,.0f}"
-                    if loan_balance is not None
-                    else "Balance unavailable — reconcile ledger"
-                )
-                borrower_table.append({
-                    "Member": member_name,
-                    "Loan Balance": loan_balance_val,
-                    "Loan Status": row.get("loan_status") or row.get("Loan Status") or "Unknown",
-                })
-            if borrower_table:
-                borrower_df = pd.DataFrame(borrower_table)
-                borrower_df = pd.DataFrame(borrower_table)
-                st.dataframe(
-                    borrower_df,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={column: {"width": "small"} for column in borrower_df.columns},
-                )
-            else:
-                st.info("No approved or active loan accounts found.")
-        else:
-            pass
 
 
 if __name__ == "__main__":

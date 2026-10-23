@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 WELFARE_RESERVE_LIMIT = 100000.0
 MAX_MONTHLY_SUBSCRIPTION = 20000.0
+INACTIVE_ARREARS_THRESHOLD = 40000.0
 _CENT = Decimal("0.01")
 _ACCOUNTING_SCHEMA_READY = False
 
@@ -1276,6 +1277,7 @@ def get_welfare_fund_totals() -> dict[str, float]:
     }
 
 
+@st.cache_data(ttl=60)
 def get_admin_dashboard_balances() -> dict[str, float]:
     """Return dashboard cash/receivable/liability amounts from approved journal entries."""
     ensure_accounting_schema()
@@ -1306,6 +1308,7 @@ def get_admin_dashboard_balances() -> dict[str, float]:
     }
 
 
+@st.cache_data(ttl=60)
 def get_subscription_arrears(
     as_of: date,
     *,
@@ -1364,6 +1367,7 @@ def get_subscription_arrears(
     }
 
 
+@st.cache_data(ttl=60)
 def get_member_activity_summary(
     as_of: date,
     *,
@@ -1392,11 +1396,23 @@ def get_member_activity_summary(
         params=(date(as_of.year, 1, 1), date(as_of.year + 1, 1, 1)),
         fetch=True,
     ) or []
-    paid_by_member = {
-        str(row["member_id"]): Decimal(str(row["paid"] or 0))
-        for row in paid_rows
-        if row.get("member_id") is not None
-    }
+    paid_by_member: dict[str, Decimal] = {}
+    for row in paid_rows:
+        member_id = str(row.get("member_id") or "").strip().upper()
+        if member_id:
+            paid_by_member[member_id] = paid_by_member.get(member_id, Decimal("0.00")) + Decimal(
+                str(row.get("paid") or 0)
+            )
+    legacy_rows = _get_unposted_legacy_subscription_rows(
+        cycle_start=date(as_of.year, 1, 1),
+        cycle_end=date(as_of.year + 1, 1, 1),
+    )
+    for row in legacy_rows:
+        member_id = str(row.get("member_id") or "").strip().upper()
+        if member_id:
+            paid_by_member[member_id] = paid_by_member.get(member_id, Decimal("0.00")) + _money(
+                row.get("amount_paid") or 0
+            )
     due = _money(expected_per_month) * as_of.month
     active_statuses = {
         "active", "probationary", "probational", "partial", "partial member",
@@ -1408,10 +1424,13 @@ def get_member_activity_summary(
     inactive_names: list[str] = []
     pending_count = 0
     for member in members:
-        status = str(member.get("status") or "pending").strip().lower()
-        arrears = max(due - paid_by_member.get(str(member["member_id"]), Decimal("0.00")), Decimal("0.00"))
+        status = str(member.get("status") or "pending").strip().lower().replace("_", " ").replace("-", " ")
+        member_id = str(member.get("member_id") or "").strip().upper()
+        arrears = max(due - paid_by_member.get(member_id, Decimal("0.00")), Decimal("0.00"))
         name = str(member.get("full_name") or "")
-        if status in inactive_statuses or (status in active_statuses and arrears >= Decimal("40000")):
+        if status in inactive_statuses or (
+            status in active_statuses and arrears >= Decimal(str(INACTIVE_ARREARS_THRESHOLD))
+        ):
             inactive_names.append(name)
         elif status in active_statuses:
             active_names.append(name)
@@ -2249,6 +2268,7 @@ def get_subscription_ledger(
     return ledger
 
 
+@st.cache_data(ttl=60)
 def get_loan_portfolio() -> dict[str, Any]:
     """Return active loan accounts and only show balances supported by the journal."""
     ensure_accounting_schema()

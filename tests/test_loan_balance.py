@@ -1,8 +1,9 @@
 import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import reconcile_loans
 from src.utils.balances import (
     DuplicateFinancialTransactionError,
     _allocate_proportionally,
@@ -20,9 +21,55 @@ from src.views.loans import (
     should_apply_interest_for_loan,
     update_interest_accumulation,
 )
+from src.views.subscriptions import chairperson_monitor_view
 
 
 class LoanBalanceTests(unittest.TestCase):
+    def test_subscription_monitor_denies_roles_outside_authorized_executives(self):
+        mock_streamlit = type(
+            "MockStreamlit",
+            (),
+            {
+                "session_state": {"user_role": "Member"},
+                "markdown": staticmethod(lambda *args, **kwargs: None),
+                "info": Mock(),
+            },
+        )()
+        with patch("src.views.subscriptions.st", mock_streamlit), patch(
+            "src.views.subscriptions.render_subscriptions_styles"
+        ):
+            chairperson_monitor_view()
+
+        mock_streamlit.info.assert_called_once_with(
+            "The subscription monitor is restricted to the Chairperson, Secretary, and Treasurer."
+        )
+
+    def test_reconcile_loans_posts_opening_balance_to_journal_engine(self):
+        loans = [
+            {"loan_id": 101, "member_id": "M101", "outstanding_balance": Decimal("1250.00")},
+            {"loan_id": 102, "member_id": "M102", "outstanding_balance": Decimal("0.00")},
+        ]
+        with patch("reconcile_loans.ensure_accounting_schema") as ensure_schema, patch(
+            "reconcile_loans.execute_query", return_value=loans
+        ) as query, patch("reconcile_loans.record_opening_balance") as post_opening:
+            reconcile_loans.run_reconciliation()
+
+        ensure_schema.assert_called_once_with()
+        reconciliation_query = query.call_args.args[0]
+        self.assertIn("accounting_journal_entries", reconciliation_query)
+        self.assertIn("e.loan_id = l.loan_id", reconciliation_query)
+        self.assertIn("'LOAN_PRINCIPAL_RECEIVABLE', 'LOAN_INTEREST_RECEIVABLE'", reconciliation_query)
+        self.assertNotIn("ledger_transactions", reconciliation_query)
+        post_opening.assert_called_once_with(
+            member_id="M101",
+            amount=1250.0,
+            account_code="LOAN_PRINCIPAL_RECEIVABLE",
+            reference="automated-opening-loan:101:principal",
+            approved_by="automated-reconciliation",
+            loan_id=101,
+            notes="Automated reconciliation of legacy loan #101.",
+        )
+
     def test_member_loan_accounts_include_unledgered_loans_without_claiming_zero_balance(self):
         loan = {
             "loan_id": 101,
